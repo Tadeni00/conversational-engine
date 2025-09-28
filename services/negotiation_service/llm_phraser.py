@@ -97,6 +97,34 @@ def _sanitize_context(ctx: Optional[str]) -> str:
     s = re.sub(r'[₦$€£]', '', s)
     return s[:800]
 
+# ------------------ small context-language heuristic ------------------
+# These are compact high-signal tokens to detect if text is likely Yoruba/Hausa/Igbo.
+# We keep the list conservative so we don't over-trigger.
+_CTX_MARKERS: Dict[str, List[str]] = {
+    "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "rá", "rà", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
+    "ha": ["zan", "iya", "biya", "sayi", "saya", "naira", "ka", "zai"],          # Hausa clues
+    "ig": ["enwere", "nwoke", "nne", "nwanne", "zụta", "zuta", "daalụ", "ị", "na"],  # Igbo clues (conservative)
+}
+_CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
+
+def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
+    """
+    Heuristic: if context contains multiple tokens that match a local-language marker list,
+    return the language code 'yo'|'ha'|'ig'. Conservative: require >=1 strong hit (we keep it light).
+    """
+    if not ctx:
+        return None
+    s = ctx.lower()
+    # tokenize
+    tokens = set(_CTX_WORD_RE.findall(s))
+    for lang, markers in _CTX_MARKERS.items():
+        # count matches
+        matches = sum(1 for m in markers if m and (m in tokens or (" " + m + " ") in (" " + s + " ")))
+        if matches >= 1:
+            logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens=%s", lang, matches, list(tokens)[:10])
+            return lang
+    return None
+
 # ------------------ local model loader (optional) ------------------
 def _try_load_local_model():
     global _local_ready, _tokenizer, _model
@@ -135,7 +163,6 @@ def _try_load_local_model():
 def _extract_text_from_remote_response(j: Any) -> Optional[str]:
     """General extractor used for HF/Groq/OpenAI-style shapes."""
     try:
-        # dict shapes
         if isinstance(j, dict):
             # HF inference api common shape
             if "generated_text" in j and isinstance(j["generated_text"], str):
@@ -144,12 +171,10 @@ def _extract_text_from_remote_response(j: Any) -> Optional[str]:
             if "choices" in j and j["choices"]:
                 c0 = j["choices"][0]
                 if isinstance(c0, dict):
-                    # chat-style
                     if "message" in c0 and isinstance(c0["message"], dict):
                         msg = c0["message"]
                         if "content" in msg and isinstance(msg["content"], str):
                             return msg["content"].strip()
-                        # some providers use 'content' as list
                         if "content" in msg and isinstance(msg["content"], list):
                             parts = []
                             for p in msg["content"]:
@@ -159,10 +184,8 @@ def _extract_text_from_remote_response(j: Any) -> Optional[str]:
                                     parts.append(p)
                             if parts:
                                 return " ".join(parts).strip()
-                    # completions-style
                     if "text" in c0 and isinstance(c0["text"], str):
                         return c0["text"].strip()
-            # groq/hf outputs list
             if "outputs" in j and isinstance(j["outputs"], list) and j["outputs"]:
                 out0 = j["outputs"][0]
                 if isinstance(out0, dict):
@@ -180,7 +203,6 @@ def _extract_text_from_remote_response(j: Any) -> Optional[str]:
                                     texts.append(block["content"])
                         if texts:
                             return " ".join(texts).strip()
-        # list fallback
         if isinstance(j, list) and j:
             if isinstance(j[0], str):
                 return j[0].strip()
@@ -194,14 +216,10 @@ def _extract_text_from_remote_response(j: Any) -> Optional[str]:
     return None
 
 # ------------------ remote caller ------------------
-def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
+def _call_remote_llm(prompt: str, timeout: int = None, lang_key: str = "en") -> Optional[str]:
     """
     Calls the configured remote LLM provider.
-    Supports:
-      - GROQ: OpenAI-compatible chat/completions shape (messages + max_tokens)
-      - HF: Hugging Face Inference API (inputs + parameters)
-      - OPENAI (when OPENAI_API_KEY used against openai-compatible endpoints)
-    Returns generated text or None.
+    lang_key en|pcm used to force remote response language (en or pcm).
     """
     provider = LLM_REMOTE_PROVIDER.upper()
     headers = _auth_headers()
@@ -210,7 +228,6 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
 
     logger.debug("[llm_phraser] _call_remote_llm provider=%s url=%s model=%s timeout=%s", provider, url, LLM_MODEL, timeout)
     if not url:
-        # sensible defaults for providers
         if provider == "GROQ":
             url = "https://api.groq.com/openai/v1/chat/completions"
         elif provider == "HF":
@@ -221,9 +238,13 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
             logger.warning("[llm_phraser] No LLM_REMOTE_URL configured and no sane default for provider=%s", provider)
             return None
 
-    # Warn when no Authorization header present for providers that expect it
     if "Authorization" not in headers:
         logger.warning("[llm_phraser] No Authorization header set for provider=%s — remote call may be rejected", provider)
+
+    if lang_key == "pcm":
+        remote_sys_lang = "You MUST reply only in Nigerian Pidgin (pcm). Do not include English."
+    else:
+        remote_sys_lang = "You MUST reply only in English (do not include other languages)."
 
     def _try_post(cur_url: str) -> Optional[requests.Response]:
         try:
@@ -231,7 +252,7 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
                 payload = {
                     "model": LLM_MODEL,
                     "messages": [
-                        {"role": "system", "content": "You are a polite Nigerian market seller and negotiator."},
+                        {"role": "system", "content": f"You are a polite Nigerian market seller and negotiator. {remote_sys_lang}"},
                         {"role": "user", "content": prompt}
                     ],
                     "max_tokens": LLM_MAX_TOKENS,
@@ -241,7 +262,8 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
                 return _session.post(cur_url, json=payload, headers=headers, timeout=timeout)
 
             if provider == "HF":
-                payload = {"inputs": prompt, "parameters": {"temperature": LLM_TEMPERATURE, "max_new_tokens": LLM_MAX_TOKENS, "top_p": LLM_TOP_P}}
+                inputs = f"{remote_sys_lang}\n\n{prompt}"
+                payload = {"inputs": inputs, "parameters": {"temperature": LLM_TEMPERATURE, "max_new_tokens": LLM_MAX_TOKENS, "top_p": LLM_TOP_P}}
                 return _session.post(cur_url, json=payload, headers=headers, timeout=timeout)
 
             logger.warning("[llm_phraser] Unknown provider in runtime: %s", provider)
@@ -252,7 +274,6 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
 
     tried_urls = []
     candidate_urls: List[str] = [url]
-    # add common alternates for OpenAI/Groq endpoints
     if provider == "GROQ" or provider == "OPENAI":
         if "chat/completions" in url:
             candidate_urls.append(url.replace("chat/completions", "chat"))
@@ -281,10 +302,8 @@ def _call_remote_llm(prompt: str, timeout: int = None) -> Optional[str]:
             txt = _extract_text_from_remote_response(j)
             if txt:
                 return txt.strip()
-            # maybe the endpoint returns a simple string body
             if isinstance(j, str):
                 return j.strip()
-        # fallback: raw text
         if resp.text and len(resp.text) > 0:
             raw = resp.text.strip()
             if raw:
@@ -431,9 +450,6 @@ final_price: {final_price}
 
 # ------------------ policy (refined) ------------------
 def compute_counter_price(base_price: int, offer: Optional[int], min_price: Optional[int] = None) -> Tuple[str, Optional[int]]:
-    """
-    Refined dynamic policy: unchanged from prior logic (keeps behavioral parity).
-    """
     if offer is None:
         return "ASK_CLARIFY", None
     try:
@@ -452,7 +468,6 @@ def compute_counter_price(base_price: int, offer: Optional[int], min_price: Opti
             min_eff = computed_min
     else:
         min_eff = computed_min
-
     min_eff = min(min_eff, base)
 
     buyer_pct_of_base = off / base if base > 0 else 0.0
@@ -527,11 +542,9 @@ def _next_proposal_after_reject(prev_proposals: List[int], buyer_offer: Optional
     try:
         if not prev_proposals:
             return _initial_dynamic_counter(buyer_offer, min_price, base_price)
-
         last = int(prev_proposals[-1])
         if last <= floor:
             return floor
-
         gap = max(last - floor, 0)
         step1 = int(math.ceil(gap * 0.40))
         step2 = int(math.ceil(base_price * 0.03))
@@ -549,24 +562,18 @@ def _dynamic_counter_price(buyer_offer: Optional[int], min_price: int, base_pric
         bp = int(base_price)
         if mp <= 0:
             mp = int(round(bp * DEFAULT_MIN_PRICE_RATIO))
-
         candidate75 = max(int(round(bp * 0.75)), mp)
         candidate60 = max(int(round(bp * 0.60)), mp)
-
         if buyer_offer is None:
             return candidate75
-
         bo = int(buyer_offer)
         closeness = (bo / mp) if mp > 0 else (bo / bp if bp > 0 else 0.0)
-
         if closeness >= 0.8:
             mid = int(round((bo + candidate75) / 2.0))
             return max(mid, mp)
-
         if 0.5 <= closeness < 0.8:
             mid = int(round((candidate75 + bo) / 2.0))
             return max(min(mid, candidate75), mp)
-
         return max(candidate75, mp)
     except Exception as e:
         logger.exception("[llm_phraser] _dynamic_counter_price error: %s", e)
@@ -605,16 +612,13 @@ def _render_template_reply(template_map: Dict[str, Any], action_key: str, price:
     try:
         candidate = template_map.get(action_key, template_map.get("counter"))
         tmpl = _choose_template_variant(candidate, ratio)
-
         if not isinstance(tmpl, str):
             tmpl = str(tmpl)
-
         tpl_price_int = None
         try:
             tpl_price_int = int(price) if price is not None else 0
         except Exception:
             tpl_price_int = 0
-
         return tmpl.format(price=tpl_price_int, product=product_name)
     except Exception as e:
         logger.exception("[llm_phraser] template rendering failed: %s", e)
@@ -628,34 +632,26 @@ def _normalize_lang_code(s: Optional[str]) -> str:
     if not s:
         return "en"
     s0 = str(s).strip().lower()
-    # exact mappings
-    if s0 in ("en", "eng", "english"):
+    if s0 in ("en", "eng", "english", "en_us", "en-gb", "en-us"):
         return "en"
     if s0 in ("pcm", "pidgin", "pidgin_ng", "pcm_ng", "pcm-nigeria", "pidgin-nigeria"):
         return "pcm"
-    if s0.startswith("yo") or s0 in ("yoruba", "yoruba_ng", "yoruba-nigeria"):
+    if s0.startswith("yo") or s0 in ("yoruba", "yoruba_ng", "yo_ng"):
         return "yo"
-    if s0.startswith("ha") or s0 in ("hausa", "hausa_ng", "hausa-nigeria"):
+    if s0.startswith("ha") or s0 in ("hausa", "hausa_ng", "ha_ng"):
         return "ha"
-    if s0.startswith("ig") or s0 in ("igbo", "igbo_ng", "igbo-nigeria"):
+    if s0.startswith("ig") or s0 in ("igbo", "igbo_ng", "ig_ng"):
         return "ig"
-    # else try substring picks (robust)
-    if "pidgin" in s0 or "pcm" in s0:
-        return "pcm"
-    if "yorub" in s0 or s0.startswith("yo"):
-        return "yo"
-    if "hausa" in s0 or s0.startswith("ha"):
-        return "ha"
-    if "igbo" in s0 or s0.startswith("ig"):
-        return "ig"
-    # fallback to en
+    if s0 and s0[0] in ("p", "y", "h", "i"):
+        if s0[0] == "p":
+            return "pcm"
+        if s0[0] == "y":
+            return "yo"
+        if s0[0] == "h":
+            return "ha"
+        if s0[0] == "i":
+            return "ig"
     return "en"
-
-# Languages that MUST use the template override (never call remote/local LLM)
-# Adjusted per request: strictly use templates for Yoruba, Hausa and Igbo only.
-FORCE_TEMPLATE_LANGS = {"yo", "ha", "ig"}
-# Languages we prefer to call the remote LLM for (when not explicitly disabled by LLM_MODE=TEMPLATE)
-PREFERRED_REMOTE_LANGS = {"en", "pcm"}
 
 # ------------------ main phrase() ------------------
 def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", context: Optional[str] = None) -> str:
@@ -665,10 +661,8 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
     lang: language key (en|pcm|yo|ig|ha) or variant
     Returns a user-facing string reply.
     """
-    # preserve raw for logs and normalize
-    raw_lang = lang
+    # Normalize incoming language codes
     lang_key = _normalize_lang_code(lang)
-    logger.info("[llm_phraser] phrase invoked raw_lang=%r normalized=%s", raw_lang, lang_key)
 
     prod_name = product.get("name") or product.get("id") or "product"
     base_price = int(product.get("base_price", 0))
@@ -720,46 +714,18 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
             explicit_action = "REJECT"
             explicit_price = explicit_price if explicit_price is not None else (buyer_offer or base_price)
 
-    # If explicit_action present use it; otherwise compute server-side default
     if explicit_action:
         computed_action = explicit_action
         computed_price = explicit_price if explicit_price is not None else (buyer_offer or base_price)
     else:
-        computed_action, computed_price = compute_counter_price(base_price, buyer_offer, min_price_meta)
+        computed_action, computed_price = compute_counter_price(base_price, buyer_offer)
 
-    # Ensure we never propose below floor when min_price is known
     if min_price_meta is not None and computed_price is not None:
         computed_price = max(int(computed_price), floor)
 
     final_price = int(computed_price) if computed_price is not None else None
 
-    # Decide whether to force template (strong policy)
-    if lang_key in FORCE_TEMPLATE_LANGS:
-        template_map = _TEMPLATES.get(lang_key, _TEMPLATES["en"])
-        action_map = {"ACCEPT": "accept", "REJECT": "reject", "COUNTER": "counter", "ASK_CLARIFY": "clarify"}
-        key = action_map.get(computed_action, "counter")
-        try:
-            tpl_price = final_price if final_price is not None else base_price
-            # compute ratio for variant selection
-            try:
-                min_price_for_ratio = int(min_price_meta) if min_price_meta is not None else int(round(base_price * DEFAULT_MIN_PRICE_RATIO))
-            except Exception:
-                min_price_for_ratio = int(round(base_price * DEFAULT_MIN_PRICE_RATIO))
-            ratio = None
-            try:
-                if min_price_for_ratio > 0 and buyer_offer is not None:
-                    ratio = float(buyer_offer) / float(min_price_for_ratio)
-            except Exception:
-                ratio = None
-
-            rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
-            logger.info("[llm_phraser] FORCE_TEMPLATE used for lang=%s key=%s price=%s", lang_key, key, tpl_price)
-            return rendered
-        except Exception:
-            logger.exception("[llm_phraser] forced template rendering failed for lang=%s", lang_key)
-            # fall through to normal pipeline if rendering fails
-
-    # sanitize context for prompts and build few-shot prompt
+    # sanitize context for prompts
     sanitized_ctx = _sanitize_context(context)
     fs = FEW_SHOT_PROMPT.format(lang_key=lang_key, context=sanitized_ctx, final_price=final_price)
 
@@ -776,7 +742,7 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
     logger.debug("[llm_phraser] phrase() computed_action=%s final_price=%s prod=%s lang=%s floor=%s prev_proposals=%s",
                  computed_action, final_price, prod_name, lang_key, floor, prev_proposals)
 
-    # Compute ratio for tone selection when templates are used (secondary use)
+    # Compute ratio for tone selection when templates are used
     min_price_for_ratio = None
     try:
         if min_price_meta is not None:
@@ -793,14 +759,47 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
     except Exception:
         ratio = None
 
-    # Language preference: prefer remote for English and Pidgin (pcm) unless LLM_MODE explicitly set to TEMPLATE
-    prefer_remote = lang_key in PREFERRED_REMOTE_LANGS
+    # --- LANGUAGE-BASED TEMPLATE OVERRIDE ---
+    # STRICT: only Yoruba, Hausa and Igbo MUST use templates (no remote/local)
+    TEMPLATE_ONLY_LANGS = {"yo", "ha", "ig"}
 
-    # --- REMOTE preferred (English or Pidgin) OR when LLM_MODE==REMOTE ---
-    if (LLM_MODE == "REMOTE") or (prefer_remote and LLM_MODE != "TEMPLATE"):
+    # If lang_key not already in template-only set, use context heuristic to detect
+    if lang_key not in TEMPLATE_ONLY_LANGS:
+        detected_from_ctx = _detect_local_language_from_context(sanitized_ctx)
+        if detected_from_ctx in TEMPLATE_ONLY_LANGS:
+            logger.info("[llm_phraser] overriding lang_key -> %s based on context heuristic", detected_from_ctx)
+            lang_key = detected_from_ctx
+
+    if lang_key in TEMPLATE_ONLY_LANGS:
+        template_map = _TEMPLATES.get(lang_key, _TEMPLATES["en"])
+        action_map = {"ACCEPT": "accept", "REJECT": "reject", "COUNTER": "counter", "ASK_CLARIFY": "clarify"}
+        key = action_map.get(computed_action, "counter")
+        try:
+            tpl_price = final_price if final_price is not None else base_price
+            rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
+            try:
+                meta_out = dict(meta or {})
+                prev = meta_out.get("prev_proposals", []) or []
+                if computed_action == "COUNTER":
+                    prev = list(prev) + [int(tpl_price)]
+                    meta_out["prev_proposals"] = prev
+                meta_out["floor"] = floor
+            except Exception:
+                meta_out = meta
+            logger.info("[llm_phraser] template_override=true lang=%s action=%s price=%s prod=%s ratio=%s meta_prev=%s",
+                        lang_key, computed_action, tpl_price, prod_name, ratio, meta_out.get("prev_proposals") if isinstance(meta_out, dict) else None)
+            return rendered
+        except Exception:
+            logger.exception("[llm_phraser] template override failed for lang=%s key=%s — falling through", lang_key, key)
+            # safe fallback to English template to avoid crash
+            return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio)
+
+    # --- REMOTE preferred (English or pidgin) ---
+    if LLM_MODE == "REMOTE":
         out = None
         try:
-            out = _call_remote_llm(prompt)
+            remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
+            out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
             if out and (final_price is None or _reply_contains_price(out, final_price)):
                 logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
                 return out.strip()
@@ -808,7 +807,7 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
         except Exception:
             logger.exception("[llm_phraser] remote generation error")
 
-    # --- LOCAL fallback (only try if LLM_MODE == LOCAL or remote failed and local available) ---
+    # --- LOCAL fallback ---
     if LLM_MODE == "LOCAL":
         try:
             out = _run_local_generation(prompt)

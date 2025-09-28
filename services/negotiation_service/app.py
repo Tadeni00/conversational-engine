@@ -1,9 +1,8 @@
-# services/negotiation_service/app.py
 import os
 import uuid
 import hashlib
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import requests
 from fastapi import FastAPI
@@ -23,6 +22,37 @@ except Exception:
 logger = logging.getLogger("negotiation")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO)
+
+# --- normalization helper (defensive) ---
+def _normalize_lang_code(s: Optional[str]) -> str:
+    """
+    Normalize a wide range of incoming language labels to one of:
+      'en', 'pcm', 'yo', 'ha', 'ig'
+    Accepts variants like 'pidgin', 'pcm_ng', 'yoruba', 'igbo', 'hausa', etc.
+    """
+    if not s:
+        return "en"
+    s0 = str(s).strip().lower()
+    if s0 in ("en", "eng", "english", "en_us", "en-gb", "en-us"):
+        return "en"
+    if s0 in ("pcm", "pidgin", "pidgin_ng", "pcm_ng", "pcm-nigeria", "pidgin-nigeria"):
+        return "pcm"
+    if s0.startswith("yo") or s0 in ("yoruba", "yoruba_ng", "yo_ng"):
+        return "yo"
+    if s0.startswith("ha") or s0 in ("hausa", "hausa_ng", "ha_ng"):
+        return "ha"
+    if s0.startswith("ig") or s0 in ("igbo", "igbo_ng", "ig_ng"):
+        return "ig"
+    if s0 and s0[0] in ("p", "y", "h", "i"):
+        if s0[0] == "p":
+            return "pcm"
+        if s0[0] == "y":
+            return "yo"
+        if s0[0] == "h":
+            return "ha"
+        if s0[0] == "i":
+            return "ig"
+    return "en"
 
 # Config
 LANG_DETECT_URL = os.getenv("LANGUAGE_DETECTION_URL", "http://language-detection:8000/detect")
@@ -54,7 +84,7 @@ class DecideResponse(BaseModel):
     reply: Optional[str] = None
 
 # Helpers
-def detect_language_via_service(text: Optional[str]) -> (str, float):
+def detect_language_via_service(text: Optional[str]) -> Tuple[str, float]:
     """
     POSTs to the language detection service at /detect.
     Expects JSON response { language: "en", confidence: 0.75 }.
@@ -144,7 +174,10 @@ def decide(req: DecideRequest):
     decision_id = _generate_decision_id(user_id)
 
     buyer_text = (state.get("meta") or {}).get("buyer_text") if state else None
-    lang, lang_conf = detect_language_via_service(buyer_text or f"{req.offer or ''} {req.product.name}")
+    raw_lang, lang_conf = detect_language_via_service(buyer_text or f"{req.offer or ''} {req.product.name}")
+    # Defensive normalization: ensure short codes expected by phrase()
+    lang = _normalize_lang_code(raw_lang)
+    logger.info("[negotiation] language detection -> raw=%s normalized=%s conf=%.3f", raw_lang, lang, lang_conf)
 
     # Decision logic: basic default
     action = "COUNTER" if req.offer else "ASK_CLARIFY"

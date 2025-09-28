@@ -1,4 +1,3 @@
-# services/conversation_engine/src/core/app.py
 import os
 import sys
 import glob
@@ -13,9 +12,45 @@ logger = logging.getLogger("language-detection")
 if not logger.handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# --- normalization helper added ---
+def _normalize_lang_code(s: Optional[str]) -> str:
+    """
+    Normalize a wide range of incoming language labels to one of:
+      'en', 'pcm', 'yo', 'ha', 'ig'
+    Accepts variants like 'pidgin', 'pcm_ng', 'yoruba', 'igbo', 'hausa', etc.
+    """
+    if not s:
+        return "en"
+    s0 = str(s).strip().lower()
+    # English
+    if s0 in ("en", "eng", "english", "en_us", "en-gb", "en-us"):
+        return "en"
+    # pidgin / pcm
+    if s0 in ("pcm", "pidgin", "pidgin_ng", "pcm_ng", "pcm-nigeria", "pidgin-nigeria"):
+        return "pcm"
+    # yoruba
+    if s0.startswith("yo") or s0 in ("yoruba", "yoruba_ng", "yo_ng"):
+        return "yo"
+    # hausa
+    if s0.startswith("ha") or s0 in ("hausa", "hausa_ng", "ha_ng"):
+        return "ha"
+    # igbo
+    if s0.startswith("ig") or s0 in ("igbo", "igbo_ng", "ig_ng"):
+        return "ig"
+    # heuristics: first letter
+    if s0 and s0[0] in ("p", "y", "h", "i"):
+        if s0[0] == "p":
+            return "pcm"
+        if s0[0] == "y":
+            return "yo"
+        if s0[0] == "h":
+            return "ha"
+        if s0[0] == "i":
+            return "ig"
+    return "en"
+
 # attempt imports in multiple ways. If found, set detect_language(text)->(lang,conf)
 detect_language = None
-_import_error = None
 
 def _try_import_by_name(name: str):
     try:
@@ -25,7 +60,6 @@ def _try_import_by_name(name: str):
             logger.info("Imported detect_language via module '%s'", name)
             return fn
     except Exception as e:
-        # log debug
         logger.debug("import by name '%s' failed: %s", name, e)
     return None
 
@@ -71,7 +105,6 @@ if detect_language is None:
         if detect_language:
             break
 
-# final fallback: log the last import error if any
 if detect_language is None:
     logger.error("language_detection module not available (tried conversation_engine.language_detection, language_detection, and files under /app).")
 else:
@@ -94,7 +127,6 @@ def ping():
 def detect(req: DetectRequest):
     if detect_language is None:
         logger.error("language_detection implementation missing — cannot service /detect")
-        # Helpful error for debugging; logs contain import attempts
         raise HTTPException(status_code=500, detail="language detection backend missing (check service logs)")
 
     text = (req.text or "").strip()
@@ -102,10 +134,12 @@ def detect(req: DetectRequest):
         return DetectResponse(language="en", confidence=0.5)
 
     try:
-        lang, conf = detect_language(text)
-        lang = str(lang or "en")
+        raw_lang, conf = detect_language(text)
+        # normalize to short codes used by services
+        lang = _normalize_lang_code(raw_lang)
         conf = float(conf or 0.0)
         conf = max(0.0, min(1.0, conf))
+        logger.info("[language-detection] detect -> raw=%s normalized=%s conf=%.3f", raw_lang, lang, conf)
         return DetectResponse(language=lang, confidence=conf)
     except Exception as e:
         logger.exception("language detection runtime error: %s", e)

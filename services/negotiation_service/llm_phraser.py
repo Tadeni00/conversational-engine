@@ -1,3 +1,4 @@
+# llm_phraser.py — improved from your last-working copy (patched for template-only guard)
 from __future__ import annotations
 import os
 import re
@@ -32,6 +33,14 @@ LLM_REMOTE_TIMEOUT = int(os.getenv("LLM_REMOTE_TIMEOUT", "20"))
 # negotiation default min ratio (used when product.min_price missing)
 DEFAULT_MIN_PRICE_RATIO = float(os.getenv("DEFAULT_MIN_PRICE_RATIO", "0.5"))
 
+# --- NEW FLAGS (opt-in) ---
+# require this many context marker matches before auto-overriding to local templates (safer default)
+LLM_CONTEXT_MATCHES = int(os.getenv("LLM_CONTEXT_MATCHES", "2"))
+# allow remote/local outputs even if numeric price check fails (useful for testing)
+LLM_ALLOW_REMOTE_WITHOUT_PRICE = os.getenv("LLM_ALLOW_REMOTE_WITHOUT_PRICE", "false").lower() in ("1", "true", "y", "yes")
+# verbose remote debug logging (show remote JSON/text previews, extraction diagnostics)
+LLM_DEBUG_REMOTE = os.getenv("LLM_DEBUG_REMOTE", "false").lower() in ("1", "true", "y", "yes")
+
 # ------------------ startup diagnostic (masked) ------------------
 def _mask_key(s: Optional[str]) -> str:
     if not s:
@@ -44,8 +53,9 @@ logger.info(
     LLM_MODE, LLM_REMOTE_PROVIDER, LLM_REMOTE_URL or "<none>", LLM_MODEL, LLM_REMOTE_TIMEOUT
 )
 logger.info(
-    "[llm_phraser] startup keys: GROQ=%s LLM_API=%s OPENAI=%s HF=%s DEFAULT_MIN_PRICE_RATIO=%s",
-    _mask_key(GROQ_API_KEY), _mask_key(LLM_API_KEY), _mask_key(OPENAI_API_KEY), _mask_key(HF_TOKEN), DEFAULT_MIN_PRICE_RATIO
+    "[llm_phraser] startup keys: GROQ=%s LLM_API=%s OPENAI=%s HF=%s DEFAULT_MIN_PRICE_RATIO=%s CONTEXT_MATCHES=%s ALLOW_REMOTE_NO_PRICE=%s DEBUG_REMOTE=%s",
+    _mask_key(GROQ_API_KEY), _mask_key(LLM_API_KEY), _mask_key(OPENAI_API_KEY), _mask_key(HF_TOKEN), DEFAULT_MIN_PRICE_RATIO,
+    LLM_CONTEXT_MATCHES, LLM_ALLOW_REMOTE_WITHOUT_PRICE, LLM_DEBUG_REMOTE
 )
 
 # ------------------ requests session w/ retries ------------------
@@ -101,16 +111,16 @@ def _sanitize_context(ctx: Optional[str]) -> str:
 # These are compact high-signal tokens to detect if text is likely Yoruba/Hausa/Igbo.
 # We keep the list conservative so we don't over-trigger.
 _CTX_MARKERS: Dict[str, List[str]] = {
-    "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "rá", "rà", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
+    "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
     "ha": ["zan", "iya", "biya", "sayi", "saya", "naira", "ka", "zai"],          # Hausa clues
-    "ig": ["enwere", "nwoke", "nne", "nwanne", "zụta", "zuta", "daalụ", "ị", "na"],  # Igbo clues (conservative)
+    "ig": ["enwere", "nwoke", "nne", "nwanne", "daalụ", "ị", "na"],  # Igbo clues (conservative)
 }
 _CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
 def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
     """
     Heuristic: if context contains multiple tokens that match a local-language marker list,
-    return the language code 'yo'|'ha'|'ig'. Conservative: require >=1 strong hit (we keep it light).
+    return the language code 'yo'|'ha'|'ig'. Requires >= LLM_CONTEXT_MATCHES hits to trigger.
     """
     if not ctx:
         return None
@@ -118,10 +128,23 @@ def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
     # tokenize
     tokens = set(_CTX_WORD_RE.findall(s))
     for lang, markers in _CTX_MARKERS.items():
-        # count matches
-        matches = sum(1 for m in markers if m and (m in tokens or (" " + m + " ") in (" " + s + " ")))
-        if matches >= 1:
-            logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens=%s", lang, matches, list(tokens)[:10])
+        # count matches: allow either token match or substring match to be more robust
+        matches = 0
+        for m in markers:
+            if not m:
+                continue
+            try:
+                if m in tokens:
+                    matches += 1
+                elif m in s:
+                    # substring appearance (helps catch forms like "enwere", "nwoke", etc.)
+                    matches += 1
+            except Exception:
+                # defensive: skip broken marker
+                continue
+        if matches >= max(1, LLM_CONTEXT_MATCHES):
+            logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens_sample=%s (threshold=%s)",
+                         lang, matches, list(tokens)[:10], LLM_CONTEXT_MATCHES)
             return lang
     return None
 
@@ -289,6 +312,8 @@ def _call_remote_llm(prompt: str, timeout: int = None, lang_key: str = "en") -> 
         if resp is None:
             continue
         body_preview = (resp.text or "")[:4000]
+        if LLM_DEBUG_REMOTE:
+            logger.info("[llm_phraser] remote raw response preview (first 4000 chars): %s", body_preview)
         logger.debug("[llm_phraser] remote status=%s preview=%s", resp.status_code, body_preview[:1000])
         if resp.status_code >= 400:
             logger.warning("[llm_phraser] remote returned HTTP %s for %s: %s", resp.status_code, cur, body_preview[:1000])
@@ -299,14 +324,20 @@ def _call_remote_llm(prompt: str, timeout: int = None, lang_key: str = "en") -> 
             logger.exception("[llm_phraser] failed to parse JSON from remote response for %s", cur)
             j = None
         if j is not None:
+            if LLM_DEBUG_REMOTE:
+                logger.info("[llm_phraser] remote JSON: %s", str(j)[:4000])
             txt = _extract_text_from_remote_response(j)
             if txt:
+                if LLM_DEBUG_REMOTE:
+                    logger.info("[llm_phraser] remote extracted text preview: %s", (txt[:1000] + "...") if len(txt) > 1000 else txt)
                 return txt.strip()
             if isinstance(j, str):
                 return j.strip()
         if resp.text and len(resp.text) > 0:
             raw = resp.text.strip()
             if raw:
+                if LLM_DEBUG_REMOTE:
+                    logger.info("[llm_phraser] remote raw text fallback used: %s", raw[:1000])
                 return raw
     logger.warning("[llm_phraser] remote LLM call failed after trying %d URLs", len(tried_urls))
     return None
@@ -794,26 +825,50 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
             # safe fallback to English template to avoid crash
             return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio)
 
+    # Safety guard: if we reach remote/local generation, do not allow TEMPLATE_ONLY_LANGS to be handled by remote/local.
+    # (This is defensive in case calling code changed flow; template-only languages MUST use templates.)
+    if lang_key in TEMPLATE_ONLY_LANGS:
+        logger.debug("[llm_phraser] lang_key=%s is template-only; skipping remote/local generation (defensive guard)", lang_key)
+        template_map = _TEMPLATES.get(lang_key, _TEMPLATES["en"])
+        key = {"ACCEPT": "accept", "REJECT": "reject", "COUNTER": "counter", "ASK_CLARIFY": "clarify"}.get(computed_action, "counter")
+        return _render_template_reply(template_map, key, final_price if final_price is not None else base_price, prod_name, ratio)
+
     # --- REMOTE preferred (English or pidgin) ---
     if LLM_MODE == "REMOTE":
         out = None
         try:
-            remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
-            out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
-            if out and (final_price is None or _reply_contains_price(out, final_price)):
-                logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
-                return out.strip()
-            logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back")
+            # Do not call remote LLM for template-only languages (defensive)
+            if lang_key in TEMPLATE_ONLY_LANGS:
+                logger.debug("[llm_phraser] skipping remote LLM for template-only language=%s", lang_key)
+            else:
+                remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
+                out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
+                # determine whether reply contains the expected numeric price
+                price_match = bool(out and final_price is not None and _reply_contains_price(out, final_price))
+                # Accept remote if price matches OR operator explicitly allows remote without price.
+                if out and (final_price is None or price_match or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+                    logger.info("[llm_phraser] remote accepted (price_match=%s allow_without=%s) lang_forcing=%s preview=%s",
+                                price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE, remote_lang_forcing,
+                                (out[:120] + "...") if len(out) > 120 else out)
+                    return out.strip()
+                logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back (price_match=%s allow_without=%s)",
+                               price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE)
         except Exception:
             logger.exception("[llm_phraser] remote generation error")
 
     # --- LOCAL fallback ---
     if LLM_MODE == "LOCAL":
         try:
-            out = _run_local_generation(prompt)
-            if out and (final_price is None or _reply_contains_price(out, final_price)):
-                logger.info("[llm_phraser] local_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
-                return out.strip()
+            # Do not run local generation for template-only languages
+            if lang_key in TEMPLATE_ONLY_LANGS:
+                logger.debug("[llm_phraser] skipping local generation for template-only language=%s", lang_key)
+            else:
+                out = _run_local_generation(prompt)
+                price_match = bool(out and final_price is not None and _reply_contains_price(out, final_price))
+                if out and (final_price is None or price_match or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+                    logger.info("[llm_phraser] local_generation_ok (price_match=%s allow_without=%s) lang=%s preview=%s",
+                                price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE, lang_key, (out[:120] + "...") if len(out) > 120 else out)
+                    return out.strip()
         except Exception:
             logger.exception("[llm_phraser] local generation error")
 

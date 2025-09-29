@@ -118,11 +118,37 @@ _CTX_MARKERS: Dict[str, List[str]] = {
 _CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
 def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
-    """
-    Heuristic: if context contains multiple tokens that match a local-language marker list,
-    return the language code 'yo'|'ha'|'ig'. Requires >= LLM_CONTEXT_MATCHES hits to trigger.
-    """
+
     if not ctx:
+        return None
+    s = ctx.lower().strip()
+    # tokenize as words, keep both list and set for short-context handling
+    word_list = _CTX_WORD_RE.findall(s)
+    tokens = set(word_list)
+
+    # If the context is very short (<= 5 tokens) we relax the threshold to 1
+    # so a single high-signal marker (e.g. "nwanne", "enwere", "mo") will trigger.
+    try:
+        token_count = len(word_list)
+    except Exception:
+        token_count = 0
+
+    base_threshold = max(1, LLM_CONTEXT_MATCHES)
+    effective_threshold = 1 if token_count <= 5 else base_threshold
+
+    for lang, markers in _CTX_MARKERS.items():
+        # count matches (allow substring matches for multi-word markers)
+        matches = sum(
+            1 for m in markers
+            if m and (m in tokens or (" " + m + " ") in (" " + s + " "))
+        )
+        if matches >= effective_threshold:
+            logger.debug(
+                "[llm_phraser] context heuristic matched lang=%s matches=%s tokens=%s (token_count=%s effective_threshold=%s base_threshold=%s)",
+                lang, matches, list(tokens)[:10], token_count, effective_threshold, base_threshold
+            )
+            return lang
+
         return None
     s = ctx.lower()
     # tokenize

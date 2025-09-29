@@ -685,7 +685,9 @@ def _normalize_lang_code(s: Optional[str]) -> str:
     return "en"
 
 # ------------------ main phrase() ------------------
-def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", context: Optional[str] = None) -> str:
+def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en",
+           context: Optional[str] = None, use_remote_expected: Optional[bool] = None, **kwargs) -> str:
+
     """
     decision: dict possibly containing 'action', 'price', 'offer', 'meta'
     product: dict with 'name' and 'base_price'

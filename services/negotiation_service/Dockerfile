@@ -5,7 +5,7 @@ WORKDIR /app
 
 # small apt deps
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential ca-certificates curl && \
+    apt-get install -y --no-install-recommends build-essential ca-certificates curl iproute2 procps && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install
@@ -15,6 +15,10 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
 
 # Copy the negotiation service into a package directory
 COPY services/negotiation_service/ /app/negotiation_service/
+COPY services/negotiation_service/requirements.txt /app/requirements.txt
+
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /app/negotiation_service/requirements.txt
 
 # ensure __init__.py exists (safe) and entrypoint is executable
 RUN test -f /app/negotiation_service/__init__.py || touch /app/negotiation_service/__init__.py

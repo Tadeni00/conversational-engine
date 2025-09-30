@@ -15,6 +15,8 @@ RUN python -m pip install --upgrade pip setuptools wheel && \
 
 # Put the package sources under /app/conversation_engine so imports work:
 COPY services/conversation_engine/src/ /app/conversation_engine/
+# copy wrapper to app.py so uvicorn app:app will work
+COPY services/conversation_engine/src/app.py /app/app.py
 
 # Also make llm_phraser available at /app/llm_phraser.py (optional helper)
 COPY services/negotiation_service/llm_phraser.py /app/llm_phraser.py

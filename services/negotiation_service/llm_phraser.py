@@ -1,4 +1,4 @@
-# llm_phraser.py — improved from your last-working copy (patched for template-only guard)
+# llm_phraser.py — merged & fixed (backwards-compatible)
 from __future__ import annotations
 import os
 import re
@@ -118,59 +118,43 @@ _CTX_MARKERS: Dict[str, List[str]] = {
 _CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
 def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
-
+    """
+    Heuristic: if context contains multiple tokens that match a local-language marker list,
+    return the language code 'yo'|'ha'|'ig'. This function is conservative on longer contexts
+    using LLM_CONTEXT_MATCHES but relaxes threshold for short inputs (so short user messages
+    like "Nwanne, kedu?" still trigger).
+    """
     if not ctx:
-        return None
-    s = ctx.lower().strip()
-    # tokenize as words, keep both list and set for short-context handling
-    word_list = _CTX_WORD_RE.findall(s)
-    tokens = set(word_list)
-
-    # If the context is very short (<= 5 tokens) we relax the threshold to 1
-    # so a single high-signal marker (e.g. "nwanne", "enwere", "mo") will trigger.
-    try:
-        token_count = len(word_list)
-    except Exception:
-        token_count = 0
-
-    base_threshold = max(1, LLM_CONTEXT_MATCHES)
-    effective_threshold = 1 if token_count <= 5 else base_threshold
-
-    for lang, markers in _CTX_MARKERS.items():
-        # count matches (allow substring matches for multi-word markers)
-        matches = sum(
-            1 for m in markers
-            if m and (m in tokens or (" " + m + " ") in (" " + s + " "))
-        )
-        if matches >= effective_threshold:
-            logger.debug(
-                "[llm_phraser] context heuristic matched lang=%s matches=%s tokens=%s (token_count=%s effective_threshold=%s base_threshold=%s)",
-                lang, matches, list(tokens)[:10], token_count, effective_threshold, base_threshold
-            )
-            return lang
-
         return None
     s = ctx.lower()
     # tokenize
     tokens = set(_CTX_WORD_RE.findall(s))
+    token_count = len(tokens)
+
+    # For short user messages, require only 1 marker match to be permissive.
+    # For longer messages use the configured LLM_CONTEXT_MATCHES threshold.
+    effective_threshold = 1 if token_count < 6 else max(1, int(LLM_CONTEXT_MATCHES))
+
     for lang, markers in _CTX_MARKERS.items():
-        # count matches: allow either token match or substring match to be more robust
         matches = 0
         for m in markers:
             if not m:
                 continue
-            try:
-                if m in tokens:
-                    matches += 1
-                elif m in s:
-                    # substring appearance (helps catch forms like "enwere", "nwoke", etc.)
-                    matches += 1
-            except Exception:
-                # defensive: skip broken marker
+            m_l = m.lower()
+            # direct token match
+            if m_l in tokens:
+                matches += 1
                 continue
-        if matches >= max(1, LLM_CONTEXT_MATCHES):
-            logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens_sample=%s (threshold=%s)",
-                         lang, matches, list(tokens)[:10], LLM_CONTEXT_MATCHES)
+            # substring match (covers multi-word markers)
+            if m_l in s:
+                matches += 1
+                continue
+            # safe word-boundary check
+            if re.search(r'\b' + re.escape(m_l) + r'\b', s):
+                matches += 1
+                continue
+        if matches >= effective_threshold:
+            logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens_sample=%s (threshold=%s)", lang, matches, list(tokens)[:10], effective_threshold)
             return lang
     return None
 
@@ -711,13 +695,12 @@ def _normalize_lang_code(s: Optional[str]) -> str:
     return "en"
 
 # ------------------ main phrase() ------------------
-def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en",
-           context: Optional[str] = None, use_remote_expected: Optional[bool] = None, **kwargs) -> str:
-
+def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", context: Optional[str] = None, use_remote_expected: Optional[bool] = None) -> str:
     """
     decision: dict possibly containing 'action', 'price', 'offer', 'meta'
     product: dict with 'name' and 'base_price'
     lang: language key (en|pcm|yo|ig|ha) or variant
+    use_remote_expected: optional backward-compatible flag accepted by callers (ignored by default here)
     Returns a user-facing string reply.
     """
     # Normalize incoming language codes
@@ -853,50 +836,26 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en",
             # safe fallback to English template to avoid crash
             return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio)
 
-    # Safety guard: if we reach remote/local generation, do not allow TEMPLATE_ONLY_LANGS to be handled by remote/local.
-    # (This is defensive in case calling code changed flow; template-only languages MUST use templates.)
-    if lang_key in TEMPLATE_ONLY_LANGS:
-        logger.debug("[llm_phraser] lang_key=%s is template-only; skipping remote/local generation (defensive guard)", lang_key)
-        template_map = _TEMPLATES.get(lang_key, _TEMPLATES["en"])
-        key = {"ACCEPT": "accept", "REJECT": "reject", "COUNTER": "counter", "ASK_CLARIFY": "clarify"}.get(computed_action, "counter")
-        return _render_template_reply(template_map, key, final_price if final_price is not None else base_price, prod_name, ratio)
-
     # --- REMOTE preferred (English or pidgin) ---
     if LLM_MODE == "REMOTE":
         out = None
         try:
-            # Do not call remote LLM for template-only languages (defensive)
-            if lang_key in TEMPLATE_ONLY_LANGS:
-                logger.debug("[llm_phraser] skipping remote LLM for template-only language=%s", lang_key)
-            else:
-                remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
-                out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
-                # determine whether reply contains the expected numeric price
-                price_match = bool(out and final_price is not None and _reply_contains_price(out, final_price))
-                # Accept remote if price matches OR operator explicitly allows remote without price.
-                if out and (final_price is None or price_match or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
-                    logger.info("[llm_phraser] remote accepted (price_match=%s allow_without=%s) lang_forcing=%s preview=%s",
-                                price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE, remote_lang_forcing,
-                                (out[:120] + "...") if len(out) > 120 else out)
-                    return out.strip()
-                logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back (price_match=%s allow_without=%s)",
-                               price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE)
+            remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
+            out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
+            if out and (final_price is None or _reply_contains_price(out, final_price) or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+                logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
+                return out.strip()
+            logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back")
         except Exception:
             logger.exception("[llm_phraser] remote generation error")
 
     # --- LOCAL fallback ---
     if LLM_MODE == "LOCAL":
         try:
-            # Do not run local generation for template-only languages
-            if lang_key in TEMPLATE_ONLY_LANGS:
-                logger.debug("[llm_phraser] skipping local generation for template-only language=%s", lang_key)
-            else:
-                out = _run_local_generation(prompt)
-                price_match = bool(out and final_price is not None and _reply_contains_price(out, final_price))
-                if out and (final_price is None or price_match or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
-                    logger.info("[llm_phraser] local_generation_ok (price_match=%s allow_without=%s) lang=%s preview=%s",
-                                price_match, LLM_ALLOW_REMOTE_WITHOUT_PRICE, lang_key, (out[:120] + "...") if len(out) > 120 else out)
-                    return out.strip()
+            out = _run_local_generation(prompt)
+            if out and (final_price is None or _reply_contains_price(out, final_price) or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+                logger.info("[llm_phraser] local_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
+                return out.strip()
         except Exception:
             logger.exception("[llm_phraser] local generation error")
 

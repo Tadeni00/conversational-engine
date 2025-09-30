@@ -1,0 +1,34 @@
+# bring down any stale containers
+docker compose down --remove-orphans || true
+
+# rebuild only the language-detection service and start it
+docker compose build --no-cache language-detection
+docker compose up -d language-detection
+
+# follow logs
+docker compose logs -f language-detection --tail 200
+
+
+# API reachable on host
+curl -sS http://localhost:8000/ping
+curl -sS -X POST http://localhost:8000/detect -H "Content-Type: application/json" -d '{"text":"Hello"}'
+
+
+
+# start the rest of the stack if not already
+docker compose up -d negotiation conversation-engine
+
+# shell into the negotiation container and test resolution
+docker exec -it conversation_engine-negotiation /bin/sh
+# inside:
+getent hosts language-detection || true
+curl -v --max-time 2 http://language-detection:8000/ping
+exit
+
+
+./tests/test_languages.sh
+
+
+git add services/conversation_engine/src/app.py
+git commit -m "Restore conversation_engine language-detection main app.py"
+git push origin fix/llm-phraser-template-guard

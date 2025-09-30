@@ -1,4 +1,3 @@
-# # llm_phraser.py — merged & fixed (backwards-compatible)
 # from __future__ import annotations
 # import os
 # import re
@@ -33,14 +32,6 @@
 # # negotiation default min ratio (used when product.min_price missing)
 # DEFAULT_MIN_PRICE_RATIO = float(os.getenv("DEFAULT_MIN_PRICE_RATIO", "0.5"))
 
-# # --- NEW FLAGS (opt-in) ---
-# # require this many context marker matches before auto-overriding to local templates (safer default)
-# LLM_CONTEXT_MATCHES = int(os.getenv("LLM_CONTEXT_MATCHES", "2"))
-# # allow remote/local outputs even if numeric price check fails (useful for testing)
-# LLM_ALLOW_REMOTE_WITHOUT_PRICE = os.getenv("LLM_ALLOW_REMOTE_WITHOUT_PRICE", "false").lower() in ("1", "true", "y", "yes")
-# # verbose remote debug logging (show remote JSON/text previews, extraction diagnostics)
-# LLM_DEBUG_REMOTE = os.getenv("LLM_DEBUG_REMOTE", "false").lower() in ("1", "true", "y", "yes")
-
 # # ------------------ startup diagnostic (masked) ------------------
 # def _mask_key(s: Optional[str]) -> str:
 #     if not s:
@@ -53,9 +44,8 @@
 #     LLM_MODE, LLM_REMOTE_PROVIDER, LLM_REMOTE_URL or "<none>", LLM_MODEL, LLM_REMOTE_TIMEOUT
 # )
 # logger.info(
-#     "[llm_phraser] startup keys: GROQ=%s LLM_API=%s OPENAI=%s HF=%s DEFAULT_MIN_PRICE_RATIO=%s CONTEXT_MATCHES=%s ALLOW_REMOTE_NO_PRICE=%s DEBUG_REMOTE=%s",
-#     _mask_key(GROQ_API_KEY), _mask_key(LLM_API_KEY), _mask_key(OPENAI_API_KEY), _mask_key(HF_TOKEN), DEFAULT_MIN_PRICE_RATIO,
-#     LLM_CONTEXT_MATCHES, LLM_ALLOW_REMOTE_WITHOUT_PRICE, LLM_DEBUG_REMOTE
+#     "[llm_phraser] startup keys: GROQ=%s LLM_API=%s OPENAI=%s HF=%s DEFAULT_MIN_PRICE_RATIO=%s",
+#     _mask_key(GROQ_API_KEY), _mask_key(LLM_API_KEY), _mask_key(OPENAI_API_KEY), _mask_key(HF_TOKEN), DEFAULT_MIN_PRICE_RATIO
 # )
 
 # # ------------------ requests session w/ retries ------------------
@@ -111,50 +101,27 @@
 # # These are compact high-signal tokens to detect if text is likely Yoruba/Hausa/Igbo.
 # # We keep the list conservative so we don't over-trigger.
 # _CTX_MARKERS: Dict[str, List[str]] = {
-#     "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
+#     "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "rá", "rà", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
 #     "ha": ["zan", "iya", "biya", "sayi", "saya", "naira", "ka", "zai"],          # Hausa clues
-#     "ig": ["enwere", "nwoke", "nne", "nwanne", "daalụ", "ị", "na"],  # Igbo clues (conservative)
+#     "ig": ["enwere", "nwoke", "nne", "nwanne", "zụta", "zuta", "daalụ", "ị", "na"],  # Igbo clues (conservative)
 # }
 # _CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
 # def _detect_local_language_from_context(ctx: Optional[str]) -> Optional[str]:
 #     """
 #     Heuristic: if context contains multiple tokens that match a local-language marker list,
-#     return the language code 'yo'|'ha'|'ig'. This function is conservative on longer contexts
-#     using LLM_CONTEXT_MATCHES but relaxes threshold for short inputs (so short user messages
-#     like "Nwanne, kedu?" still trigger).
+#     return the language code 'yo'|'ha'|'ig'. Conservative: require >=1 strong hit (we keep it light).
 #     """
 #     if not ctx:
 #         return None
 #     s = ctx.lower()
 #     # tokenize
 #     tokens = set(_CTX_WORD_RE.findall(s))
-#     token_count = len(tokens)
-
-#     # For short user messages, require only 1 marker match to be permissive.
-#     # For longer messages use the configured LLM_CONTEXT_MATCHES threshold.
-#     effective_threshold = 1 if token_count < 6 else max(1, int(LLM_CONTEXT_MATCHES))
-
 #     for lang, markers in _CTX_MARKERS.items():
-#         matches = 0
-#         for m in markers:
-#             if not m:
-#                 continue
-#             m_l = m.lower()
-#             # direct token match
-#             if m_l in tokens:
-#                 matches += 1
-#                 continue
-#             # substring match (covers multi-word markers)
-#             if m_l in s:
-#                 matches += 1
-#                 continue
-#             # safe word-boundary check
-#             if re.search(r'\b' + re.escape(m_l) + r'\b', s):
-#                 matches += 1
-#                 continue
-#         if matches >= effective_threshold:
-#             logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens_sample=%s (threshold=%s)", lang, matches, list(tokens)[:10], effective_threshold)
+#         # count matches
+#         matches = sum(1 for m in markers if m and (m in tokens or (" " + m + " ") in (" " + s + " ")))
+#         if matches >= 1:
+#             logger.debug("[llm_phraser] context heuristic matched lang=%s matches=%s tokens=%s", lang, matches, list(tokens)[:10])
 #             return lang
 #     return None
 
@@ -232,7 +199,7 @@
 #                             if isinstance(block, dict):
 #                                 if "text" in block and isinstance(block["text"], str):
 #                                     texts.append(block["text"])
-#                                 elif "content" in block and isinstance(block["content"], str):
+#                                 elif isinstance(block, "content") and isinstance(block["content"], str):
 #                                     texts.append(block["content"])
 #                         if texts:
 #                             return " ".join(texts).strip()
@@ -322,8 +289,6 @@
 #         if resp is None:
 #             continue
 #         body_preview = (resp.text or "")[:4000]
-#         if LLM_DEBUG_REMOTE:
-#             logger.info("[llm_phraser] remote raw response preview (first 4000 chars): %s", body_preview)
 #         logger.debug("[llm_phraser] remote status=%s preview=%s", resp.status_code, body_preview[:1000])
 #         if resp.status_code >= 400:
 #             logger.warning("[llm_phraser] remote returned HTTP %s for %s: %s", resp.status_code, cur, body_preview[:1000])
@@ -334,20 +299,14 @@
 #             logger.exception("[llm_phraser] failed to parse JSON from remote response for %s", cur)
 #             j = None
 #         if j is not None:
-#             if LLM_DEBUG_REMOTE:
-#                 logger.info("[llm_phraser] remote JSON: %s", str(j)[:4000])
 #             txt = _extract_text_from_remote_response(j)
 #             if txt:
-#                 if LLM_DEBUG_REMOTE:
-#                     logger.info("[llm_phraser] remote extracted text preview: %s", (txt[:1000] + "...") if len(txt) > 1000 else txt)
 #                 return txt.strip()
 #             if isinstance(j, str):
 #                 return j.strip()
 #         if resp.text and len(resp.text) > 0:
 #             raw = resp.text.strip()
 #             if raw:
-#                 if LLM_DEBUG_REMOTE:
-#                     logger.info("[llm_phraser] remote raw text fallback used: %s", raw[:1000])
 #                 return raw
 #     logger.warning("[llm_phraser] remote LLM call failed after trying %d URLs", len(tried_urls))
 #     return None
@@ -371,122 +330,246 @@
 #         logger.exception("[llm_phraser] local generation failed: %s", e)
 #         return None
 
-# # ------------------ templates (unchanged structure, lists allowed) ------------------
+# # ------------------ templates (updated, varied) ------------------
 # _TEMPLATES = {
 #     "en": {
 #         "accept": [
-#             "My dear, deal done! ₦{price:,} for {product}, you’ll shine! Pay now!",
-#             "Thank you, we’re set! ₦{price:,} for {product}, grab it quick!"
+#             "Deal done — ₦{price:,} for {product}. Solid choice. Ready when you are.",
+#             "Price locked: ₦{price:,} for {product}. Don’t sleep on this — confirm payment.",
+#             "It’s a yes! ₦{price:,} for {product}. You pay, I seal the deal.",
+#             "Sweet deal: ₦{price:,} for {product}. Secure it now and thank me later.",
+#             "Aunty/Uncle approved — ₦{price:,} for {product}. Complete payment to seal.",
+#             "Confirmed: ₦{price:,} for {product}. Pay to hold it — I’ll pack it up.",
+#             "Final: ₦{price:,} for {product}. Click pay or send transfer, I’ll box it."
 #         ],
 #         "counter": [
-#             "Nice try, but let’s do ₦{price:,} for {product}. Take it now!",
-#             "I hear you! Best I can do is ₦{price:,} for {product}. Buy now?"
+#             "I can meet you at ₦{price:,} for {product}. Fair offer — you in?",
+#             "Closest I can go is ₦{price:,} for {product}. Take it and prosper.",
+#             "I stretch to ₦{price:,} for {product} — that’s my best. Oya decide.",
+#             "Make it ₦{price:,} for {product} and we’re shaking hands. Shall we?",
+#             "I’ll drop to ₦{price:,} for {product} but that’s the floor. Grab?",
+#             "I can do ₦{price:,} for {product} — it's tight margin but fair. Ready to confirm?",
+#             "Final counter: ₦{price:,} for {product}. If you want it, pay now."
 #         ],
 #         "reject": [
-#             "Ouch, too low for {product}! Best is ₦{price:,}, don’t miss it!",
-#             "That price no fit o! ₦{price:,} for {product}, let’s deal!"
+#             "Sorry, can’t take that — {product} needs at least ₦{price:,}. Let’s be realistic.",
+#             "That offer won’t cut it. I need ₦{price:,} for {product}. Try again?",
+#             "Too low, friend — ₦{price:,} is the honest price for {product}.",
+#             "I can’t accept that; {product} value is ₦{price:,}. Think it over.",
+#             "Not workable — lowest is ₦{price:,} for {product}. Come back if you can.",
+#             "I can’t at that price. Lowest I take is ₦{price:,} — or meet me halfway and I’ll counter."
 #         ],
 #         "clarify": [
-#             "What price are you thinking for {product}? Share now, let’s deal!",
-#             "My friend, what’s your budget for {product}? Let me know!"
+#             "What price are you thinking for {product}? Tell me a number.",
+#             "How much are you thinking for {product}? Give me your best offer.",
+#             "Help me understand — what’s your budget for {product}?",
+#             "State the price you want for {product} and I’ll respond.",
+#             "What’s your best offer for {product}? Speak now so we move fast.",
+#             "Give a number for {product} (e.g., 5,000) so I can reply."
 #         ]
 #     },
-#     "pcm": {
+
+#     "pcm": {  # Nigerian Pidgin
 #         "accept": [
-#             "Correct deal! ₦{price:,} for {product}, e go sweet you! Pay sharp!",
-#             "Na so! ₦{price:,} for {product}, you go love am! Buy now!"
+#             "Na deal! ₦{price:,} for {product}. Correct choice. You go make payment now?",
+#             "Price set: ₦{price:,} for {product}. No dulling — make I receive alert nah.",
+#             "Yes o! ₦{price:,} for {product}. You pay, I package am, no dulling.",
+#             "Gbedu done: ₦{price:,} for {product}. Oya send money make I arrange am for you sharp sharp.",
+#             "I dey with you — ₦{price:,} for {product}. Make you pay to lock.",
+#             "Na final: ₦{price:,} for {product}. Make payment so I fit reserve am.",
+#             "Deal sealed — ₦{price:,} for {product}. Send transfer and I go start packaging."
 #         ],
 #         "counter": [
-#             "You try, but I fit do ₦{price:,} for {product}. Oya, take am!",
-#             "No wahala, I go give ₦{price:,} for {product}. You dey in?",
+#             "I fit give ₦{price:,} for {product}. E balance — you ready?",
+#             "Closest I go down na ₦{price:,} for {product}. Oya take am.",
+#             "I go drop to ₦{price:,} for {product}, that one be my last.",
+#             "Make we meet for ₦{price:,} for {product}. Na fair play.",
+#             "I fit accept ₦{price:,} for {product}, na small small we dey do market.",
+#             "Last I fit: ₦{price:,} for {product}. If you want am, make you pay now."
 #         ],
 #         "reject": [
-#             "Haba, dat one too small for {product}! ₦{price:,}, abeg grab am!",
-#             "No way o, {product} worth ₦{price:,}! Oya, make we talk business!"
+#             "Haba, dat one too small — {product} need ₦{price:,}. You sef think am nah.",
+#             "Ah my oga go sack me if I accept that price — ₦{price:,} na minimum for {product}.",
+#             "That offer no correct. I need ₦{price:,} for {product}.",
+#             "E no go work — lowest na ₦{price:,} for {product}.",
+#             "Abeg, dat price no reach. ₦{price:,} be the real one.",
+#             "E no fit. If you fit reach ₦{price:,} we fit do small small market."
 #         ],
 #         "clarify": [
-#             "Abeg, wetin price you dey reason for {product}? Talk quick!",
-#             "Bros, which price you dey eye for {product}? Tell me now!"
+#             "Which price you dey reason for {product}? Tell me now.",
+#             "How much you fit pay for {product}? Give figure.",
+#             "Wetin be your budget for {product}? Make we yan.",
+#             "Give your best price for {product} so we fit move.",
+#             "Abeg state the price you want for {product} — quick answer.",
+#             "Give number (like 5000) for {product} make I yan."
 #         ]
 #     },
+
 #     "yo": {
 #         "accept": [
-#             "O ṣeun! ₦{price:,} fún {product}, ẹ rẹwà pẹ̀lú rẹ̀! Ra báyìí!",
-#             "Ẹ ṣé, a ti ṣe! ₦{price:,} fún {product}, kíá ra ni!",
+#             "Ẹ̀wẹ̀ — ₦{price:,} fún {product}. Oun tí ó dá. Tẹ̀ síwájú kí o san.",
+#             "Iye ti a tẹ̀sí: ₦{price:,} fún {product}. Má ṣe fà áyá — ra bayìí.",
+#             "Ó dá! ₦{price:,} fún {product}. San, a máa ranṣẹ́.",
+#             "Ìpinnu wà: ₦{price:,} fún {product}. Gba kíákíá.",
+#             "Mo fọwọ́sowọ́ pọ̀ — ₦{price:,} fún {product}. San láti fi dékun."
 #         ],
 #         "counter": [
-#             "Ó dá, ṣùgbọ́n mo lè gba ₦{price:,} fún {product}. Ṣé ẹ rà?",
-#             "Ẹ̀gbọ́n, mo lè fun ọ ni ₦{price:,} fún {product}. Ra kíákíá!",
+#             "Mo lè gba ₦{price:,} fún {product}. Ṣe o nífẹ̀ẹ́?",
+#             "Ìwọ̀n tó sunmọ̀ jẹ́ ₦{price:,} fún {product}. Oya, gba.",
+#             "Mo dínkù sí ₦{price:,} fún {product}, ìyẹn ni ìpinnu mi.",
+#             "Ṣe ₦{price:,} fún {product} kí a lè pari ìsọ̀kan.",
+#             "Èmi yóò gba ₦{price:,} fún {product} — ìyẹn ni àfojúsùn mi."
 #         ],
 #         "reject": [
-#             "Há, kéré jù fún {product}! ₦{price:,} ni mo lè gba, má ṣe yọ̀ọ̀!",
-#             "Kò tó fún {product}! ₦{price:,} ni, jọ̀ọ́, ṣé ẹ rà?",
+#             "Rárá, kò tó — {product} tọ́ ₦{price:,}. Jọwọ ròyìn.",
+#             "Ibere ko wulo. Mo nilo ₦{price:,} fún {product}.",
+#             "Kò ṣeé gba — iye kéré. ₦{price:,} ni otitọ.",
+#             "Ẹ jọ̀, ìfilọ́lẹ̀ yìí kì í dé. ₦{price:,} ni mo lè gba.",
+#             "Ó kéré ju — ìwọ lè tún rò, ₦{price:,} ni ìwòye mi."
 #         ],
 #         "clarify": [
-#             "Jọ̀ọ́, mélòó ni ẹ rò fún {product}? Sọ fún mi kíákíá!",
-#             "Ẹ̀gbọ́n, kí ni ìdíwọ̀n rẹ fún {product}? Sọ báyìí!"
+#             "Ṣé mélòó ni o rò fún {product}? Sọ fún mi.",
+#             "Kí ni ìsúná rẹ fún {product}? Jẹ́ kó ye mi.",
+#             "Ẹ sọ iye tí o lè san fún {product}, má fi dúró.",
+#             "Ṣe o lè fi owó kan ṣàpèjúwe? ₦… fún {product}?",
+#             "Jọwọ, sọ iye rẹ fún {product} kí a lè bá a ṣèrànwọ́."
 #         ]
 #     },
+
 #     "ha": {
 #         "accept": [
-#             "Nagode! ₦{price:,} domin {product}, zai sa ka haske! Saya yanzu!",
-#             "Na gode, mun gama! ₦{price:,} don {product}, ka saya da sauri!",
+#             "Nagode — ₦{price:,} don {product}. Kyakkyawan zabi. Sai ka biya.",
+#             "Farashi an kulle: ₦{price:,} don {product}. Ka tabbatar da biyan kuɗi.",
+#             "Eh, mun amince! ₦{price:,} don {product}. Ka biya, mu shirya.",
+#             "Yau dai: ₦{price:,} don {product}. Kar ka bari ya wuce.",
+#             "Na amince — ₦{price:,} don {product}. Biya yanzu ka tabbatar."
 #         ],
 #         "counter": [
-#             "Ka ji, amma zan iya ₦{price:,} don {product}. Ka saya yanzu?",
-#             "Nagode, zan iya baka ₦{price:,} don {product}. Shin za ka saya?",
+#             "Zan iya ₦{price:,} don {product}. Wannan mafi kusa ne.",
+#             "Mafi kusa da ni: ₦{price:,} don {product}. Ka yanke shawara.",
+#             "Zan sauƙaƙa zuwa ₦{price:,} don {product}, wannan ne iyaka.",
+#             "Ka kawo ₦{price:,} don {product} sai mu gama.",
+#             "Ina iya bada ₦{price:,} don {product}, amintacce ne."
 #         ],
 #         "reject": [
-#             "Haba, wannan ƙasa ga {product}! ₦{price:,}, ka ji yanzu!",
-#             "Farashin bai isa ba ga {product}! ₦{price:,}, ka saya ko?",
+#             "Yi haƙuri, wannan ƙasa ne — {product} na ₦{price:,}.",
+#             "Ba zan iya karɓa ba. Ina bukatar ₦{price:,} don {product}.",
+#             "Farashin bai isa ba. ₦{price:,} shine gaskiya.",
+#             "Ba zai yiwu ba — mafi ƙasa shine ₦{price:,} don {product}.",
+#             "Kayi haƙuri, wannan tayi ba zata yi ba. ₦{price:,} ne."
 #         ],
 #         "clarify": [
-#             "Don Allah, wane farashi kake tunani don {product}? Fada min yanzu!",
-#             "Aboki, wane farashi kake so don {product}? Ka gaya min!",
+#             "Wane farashi kake tunani don {product}? Fada min.",
+#             "Menene kasafin kuɗin ku don {product}? Ka gaya min.",
+#             "Don Allah fa, mene ne adadin da zaka iya biya?",
+#             "Bayyana farashin da kake so don {product}, mu tattauna.",
+#             "Fada min adadin da zaka iya biya don {product} yanzu."
 #         ]
 #     },
+
 #     "ig": {
 #         "accept": [
-#             "Daalụ! ₦{price:,} maka {product}, ọ ga-eme gị ka ọgaranya! Zụta ugbu a!",
-#             "Ekele, anyị kwụsịrị! ₦{price:,} maka {product}, zụta ngwa ngwa!",
+#             "Daalụ — ₦{price:,} maka {product}. Nhọrọ ọma. Banye kwụọ.",
+#             "E jidere ọnụahịa: ₦{price:,} maka {product}. Biko kwụọ ụgwọ.",
+#             "Ọ dị mma! ₦{price:,} maka {product}. Kwụọ, anyị ga-eziga.",
+#             "Emeela: ₦{price:,} maka {product}. Nwee obi ike, zụta ugbu a.",
+#             "Ana m akwado — ₦{price:,} maka {product}. Kwụọ ka e mechaa."
 #         ],
 #         "counter": [
-#             "Ị dị mma, mana m nwere ike inye ₦{price:,} maka {product}. Zụta ugbu a?",
-#             "Daalụ, enwere m ike ịnye ₦{price:,} maka {product}. Ị dị njikere?",
+#             "Enwere m ike ime ₦{price:,} maka {product}. Nke a kacha nso.",
+#             "Ihe kacha m nwee bụ ₦{price:,} maka {product}. Ị nọ n’aka?",
+#             "M ga-ebelata ruo ₦{price:,} maka {product}, nke a bụ ikpeazụ.",
+#             "Mee ka ọ bụrụ ₦{price:,} maka {product} ka anyị kwụsịtụ.",
+#             "Anọ m na ₦{price:,} maka {product} — ọ bụ ezi onyinye."
 #         ],
 #         "reject": [
-#             "Haba, ọnụahịa a dị ala maka {product}! ₦{price:,}, biko zụta ya!",
-#             "Ọ dịghị mma maka {product}! ₦{price:,} ka m nwere, zụta ugbu a!",
+#             "Ndo, nke ahụ adịghị eru — {product} dị ₦{price:,}.",
+#             "Agaghị m anabata nke ahụ. Achọrọ m ₦{price:,} maka {product}.",
+#             "Ego ahụ dị ala. ₦{price:,} bụ ezi ọnụahịa.",
+#             "O nweghị ụzọ — ala kacha nta bụ ₦{price:,} maka {product}.",
+#             "Biko tụlee ọzọ, ọnụahịa kwesịrị ịbụ ₦{price:,}."
 #         ],
 #         "clarify": [
-#             "Biko, kedụ ọnụahịa ị na-eche maka {product}? Kwee ngwa ngwa!",
-#             "Nna, gịnị ka ị chọrọ maka ọnụahịa {product}? Kwee m ugbu a!"
+#             "Kedụ ọnụahịa ị na-eche maka {product}? Gwa m.",
+#             "Kedu ego ị nwere maka {product}? Kọwaa.",
+#             "Biko, tinyekwuo ego ị ga-akwụ maka {product}.",
+#             "Gosi ọnụahịa kacha mma gị maka {product}. Ka anyị kwuo.",
+#             "Kedụ ọnụahịa ị na-enye maka {product}? Zaghachi ngwa ngwa."
 #         ]
 #     }
 # }
 
+# # ------------------ improved FEW_SHOT_PROMPT (updated) ------------------
 # FEW_SHOT_PROMPT = """
-#     SYSTEM: You are a vibrant Nigerian market seller and expert negotiator, fluent in English (en), Pidgin (pcm), Yoruba (yo), Hausa (ha), and Igbo (ig), speaking like a native with authentic market energy. Use {lang_key} tone (short, direct, rich with Nigerian charm and banter).
-#         - Detect if a customer is speaking to you in Yoruba, English, Pidgin, Igbo, Hausa, or mixed languages and reply in the same language
+# SYSTEM: You are a vibrant Nigerian market seller and expert negotiator. Adopt a single consistent persona: an experienced, jovial, Lagos market seller — business-smart, warm, playful, and respectfully cheeky. Use the {lang_key} tone (short, direct, witty market banter).
 
-#         - Infuse replies with Nigerian market flair: use slang, proverbs, or playful haggling to build trust and warmth.
+# PRIORITY RULE — LLM vs TEMPLATE:
+#  - Use the TEMPLATES for {lang_key} as the *behavioural anchor* (phrasing families, CTAs, permitted idioms).
+#  - **For English ('en') and Pidgin ('pcm')** prefer fresh LLM-generated phrasing that *follows* template intent but is natural and varied (do NOT merely pick and return a template line verbatim every time).
+#  - For Yoruba/Igbo/Hausa you may use templates more directly, but still vary phrasing across responses.
 
-#         - Appeal to emotions (gratitude, community, pride) to persuade
+# LANGUAGE RULE (mandatory):
+#  - Reply ONLY in the language the user uses (English, Pidgin, Yoruba, Igbo, or Hausa).
+#  - If the user mixes languages, detect the dominant language and reply in that dominant language. You MAY mirror short mixed phrases sparingly **only if the user mixed**. Do NOT introduce mixed-language content otherwise.
+#  - If user's language is not detectable or unsupported, default to English with Nigerian seller flair.
 
-#         - Be firm yet polite to protect seller margin and brand value.
+# GOALS:
+#  - Keep replies short: 1–2 sentences, maximum 40 words.
+#  - Be persuasive using warmth, light humour, and culturally natural banter — but never rude or abusive.
+#  - Protect seller margin: be firm but polite; when refusing an offer, always offer a forward path (a counter or next step).
+#  - Vary phrasing: rotate templates and CTAs so responses don’t repeat the exact same line across interactions.
 
-#         - Use currency symbol ₦ and round prices to whole naira.
+# TEMPLATE & VARIATION RULES:
+#  - Use the TEMPLATES for {lang_key} as the base phrasing.
+#  - Randomize phrasing: pick different templates for repeated actions to avoid robotic repetition; for 'en' and 'pcm', prefer a generated variant rather than verbatim reuse.
+#  - CTA variation: rotate CTAs (examples: “pay to confirm”, “oya take am”, “ra bayii”, “biko kwụọ”, “secure am now”, “confirm payment”) — keep them soft but action-oriented.
+#  - Proverbs/slang: sprinkle authentic small proverbs, nicknames (“my oga”, “aunty”, “aboki”), or playful teasing in ~1 in 3 replies at most. Do NOT overuse.
 
-#         - Keep replies short (1-2 sentences, max 40 words). End with a clear CTA.
+# PRICING & NUMBERS (strict):
+#  - Always use the currency symbol ₦.
+#  - If {final_price} is provided, **echo the numeric price exactly as given** (do not reformat or invent decimals). Use {final_price} verbatim where required.
+#  - If {final_price} is NOT provided, format the price as a whole-naira integer with comma separators (e.g., 1,250) when rendering templates and replies.
+#  - Always include the numeric price and the product name somewhere in the reply.
+#  - Numeric reinforcement: you MAY repeat the numeric price once for emphasis (e.g., “₦15,000 — yes, ₦15,000”), but keep the reply within length limits.
+#  - Do not add additional numeric claims (shipping days, discounts) that are not part of the negotiation.
 
-#         - Do not invent shipping, freebies, or discounts.
+# NEGOTIATION BEHAVIOR:
+#  - ACCEPT: use an acceptance template or generated variant, express brief gratitude/energy, echo the price (prefer {final_price} when provided), include CTA to pay/confirm.
+#  - COUNTER: propose a single clear counter price (one number only), explain briefly if needed, end with CTA.
+#  - REJECT: politely refuse, state the honest minimum (prefer using {final_price} when available or the computed minimum), then immediately present a path (e.g., “I can do ₦X” or “Come back if you can reach ₦X”).
+#  - CLARIFY: ask for a numeric offer or budget in the user’s language; be short and direct.
 
-#         - Echo numeric prices exactly as provided in {final_price}.
+# STYLE RULES:
+#  - Tone by language: Pidgin = playful/casual; Yoruba/Igbo/Hausa = polite, warm, local-flavoured; English = business-savvy with market banter.
+#  - Keep lines punchy, avoid long explanations. Use one or two short clauses.
+#  - Do not invent shipping, freebies, discounts, third-party services, or timelines.
+#  - When customer mixes languages, reply in the dominant language while mirroring short mixed phrases only if present in the user message.
 
-# Context: {context}
+# FEW-SHOT EXAMPLES (short — use as behavioural templates)
+#  - Example 1 (EN, ACCEPT, final_price provided):
+#    USER: "Okay I'll take it."
+#    CONTEXT: "Matte Lipstick - Ruby"
+#    final_price: 15000
+#    ASSISTANT: "Yes — ₦15000 for Matte Lipstick - Ruby. Pay now to secure it."
 
+#  - Example 2 (PCM, COUNTER, no final_price provided):
+#    USER: "I go give 4000"
+#    CONTEXT: "Matte Lipstick - Ruby"
+#    computed counter: 9000
+#    ASSISTANT: "No wahala — I fit do ₦9,000 for Matte Lipstick - Ruby. Oya send money make I package am."
+
+# IMPLEMENTATION NOTES:
+#  - Rotate templates so the same template is not reused back-to-back for the same user.
+#  - If you generate a new phrasing (recommended for 'en' and 'pcm'), keep it within the same intent, tone, and CTA rules as the templates.
+#  - Keep replies short enough for chat UI bubbles; prioritize clarity and action.
+#  - If unsure about language detection, default to English with Nigerian market persona and ask for clarification only once, concisely.
+
+# Final instruction: Use this prompt plus the TEMPLATES for {lang_key} as your core. Always be authentic, persuasive, and business-savvy — like a real seller from the market who knows value and respects the customer.
+
+# CONTEXT: {context}
+# CUSTOMER_NAME: {customer_name}
 # NUMERIC_GROUNDS:
-# final_price: {final_price}
+#  final_price: {final_price}
 # """
 
 # # ------------------ policy (refined) ------------------
@@ -630,7 +713,7 @@
 #     except Exception:
 #         return f"₦{n}"
 
-# # ------------------ template rendering helper ------------------
+# # ------------------ template rendering helper (now supports customer_name & lang) ------------------
 # def _choose_template_variant(candidate: Any, ratio: Optional[float]) -> str:
 #     if isinstance(candidate, list):
 #         if not candidate:
@@ -649,7 +732,7 @@
 #             return random.choice(candidate)
 #     return str(candidate)
 
-# def _render_template_reply(template_map: Dict[str, Any], action_key: str, price: Optional[int], product_name: str, ratio: Optional[float] = None) -> str:
+# def _render_template_reply(template_map: Dict[str, Any], action_key: str, price: Optional[int], product_name: str, ratio: Optional[float] = None, customer_name: Optional[str] = None, lang_key: str = "en") -> str:
 #     try:
 #         candidate = template_map.get(action_key, template_map.get("counter"))
 #         tmpl = _choose_template_variant(candidate, ratio)
@@ -660,10 +743,26 @@
 #             tpl_price_int = int(price) if price is not None else 0
 #         except Exception:
 #             tpl_price_int = 0
-#         return tmpl.format(price=tpl_price_int, product=product_name)
+#         # support optional {customer} placeholder in templates
+#         safe_customer = (customer_name or "").strip() or None
+#         try:
+#             rendered = tmpl.format(price=tpl_price_int, product=product_name, customer=(safe_customer or "friend"))
+#         except Exception:
+#             # fallback to avoid KeyError if template contains unexpected placeholders
+#             rendered = tmpl.replace("{price:,}", f"{tpl_price_int:,}").replace("{product}", product_name)
+#         # prefix with short salutation if customer_name provided
+#         if safe_customer:
+#             sal_map = {"en": "{name}, ", "pcm": "{name}, ", "yo": "{name}, ", "ha": "{name}, ", "ig": "{name}, "}
+#             prefix = sal_map.get(lang_key, "{name}, ").format(name=safe_customer)
+#             # keep brief: do not over-prefix if template already starts with the name
+#             if not rendered.lower().startswith(safe_customer.lower()):
+#                 return f"{prefix}{rendered}"
+#         return rendered
 #     except Exception as e:
 #         logger.exception("[llm_phraser] template rendering failed: %s", e)
 #         try:
+#             if customer_name:
+#                 return f"{customer_name}, Our counter price is {_format_naira(price)} for {product_name}."
 #             return f"Our counter price is {_format_naira(price)} for {product_name}."
 #         except Exception:
 #             return f"Our counter price is ₦{price} for {product_name}."
@@ -694,13 +793,36 @@
 #             return "ig"
 #     return "en"
 
+# # ------------------ conservative name extractor ------------------
+# _name_patterns = [
+#     re.compile(r"\bcall me\s+([A-Za-z][A-Za-z'\-]{1,30}(?:\s[A-Za-z][A-Za-z'\-]{1,30})?)\b", re.I),
+#     re.compile(r"\bmy name is\s+([A-Za-z][A-Za-z'\-]{1,30}(?:\s[A-Za-z][A-Za-z'\-]{1,30})?)\b", re.I),
+#     re.compile(r"\bi(?:'|\s)?m\s+([A-Za-z][A-Za-z'\-]{1,30}(?:\s[A-Za-z][A-Za-z'\-]{1,30})?)\b", re.I),
+#     re.compile(r"\bi am\s+([A-Za-z][A-Za-z'\-]{1,30}(?:\s[A-Za-z][A-Za-z'\-]{1,30})?)\b", re.I)
+# ]
+
+# def _extract_name_from_context(ctx: Optional[str]) -> Optional[str]:
+#     if not ctx:
+#         return None
+#     s = ctx.strip()
+#     for pat in _name_patterns:
+#         m = pat.search(s)
+#         if m:
+#             name = m.group(1).strip()
+#             # title-case but preserve simple all-caps or multi-word
+#             name = " ".join([p.capitalize() for p in name.split()[:2]])
+#             if 1 <= len(name) <= 40:
+#                 logger.debug("[llm_phraser] extracted customer name from context: %s", name)
+#                 return name
+#     return None
+
 # # ------------------ main phrase() ------------------
-# def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", context: Optional[str] = None, use_remote_expected: Optional[bool] = None) -> str:
+# def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", context: Optional[str] = None, use_remote_expected: Optional[bool] = None, **kwargs) -> str:
 #     """
 #     decision: dict possibly containing 'action', 'price', 'offer', 'meta'
 #     product: dict with 'name' and 'base_price'
 #     lang: language key (en|pcm|yo|ig|ha) or variant
-#     use_remote_expected: optional backward-compatible flag accepted by callers (ignored by default here)
+#     use_remote_expected: optional compatibility flag (ignored by this implementation)
 #     Returns a user-facing string reply.
 #     """
 #     # Normalize incoming language codes
@@ -719,7 +841,7 @@
 #         except Exception:
 #             buyer_offer = None
 
-#     # negotiation meta (may carry min_price and previous proposals)
+#     # negotiation meta (may carry min_price and previous proposals and customer_name)
 #     meta = decision.get("meta") or {}
 #     min_price_meta = None
 #     try:
@@ -736,6 +858,21 @@
 #         prev_proposals = []
 
 #     floor = _compute_floor(min_price_meta, base_price)
+
+#     # Extract customer name preference (kwargs override meta override context)
+#     customer_name = None
+#     try:
+#         if kwargs.get("customer_name"):
+#             customer_name = str(kwargs.get("customer_name")).strip()
+#         elif isinstance(meta, dict) and meta.get("customer_name"):
+#             customer_name = str(meta.get("customer_name")).strip()
+#         else:
+#             # try to extract from context using conservative patterns
+#             candidate = _extract_name_from_context(context or "")
+#             if candidate:
+#                 customer_name = candidate
+#     except Exception:
+#         customer_name = None
 
 #     # If the decision is ESCALATE (from guard), compute a dynamic counter price >= floor
 #     if explicit_action == "ESCALATE":
@@ -769,7 +906,14 @@
 
 #     # sanitize context for prompts
 #     sanitized_ctx = _sanitize_context(context)
-#     fs = FEW_SHOT_PROMPT.format(lang_key=lang_key, context=sanitized_ctx, final_price=final_price)
+
+#     # Prepare few-shot prompt; include customer name if available
+#     fs = FEW_SHOT_PROMPT.format(
+#         lang_key=lang_key,
+#         context=sanitized_ctx,
+#         final_price=final_price if final_price is not None else "null",
+#         customer_name=(customer_name or "null")
+#     )
 
 #     input_block = (
 #         f"\nINPUT:\nproduct_name: \"{prod_name}\"\n"
@@ -777,12 +921,13 @@
 #         f"offer: {buyer_offer if buyer_offer is not None else 'null'}\n"
 #         f"counter_price: {final_price if final_price is not None else 'null'}\n"
 #         f"decision: {computed_action}\n"
+#         f"customer_name: \"{customer_name}\"" if customer_name else "customer_name: null\n"
 #     )
 #     instruction = "\nINSTRUCTION:\nReply in one or two short sentences that are friendly, respectful, persuasive and end with a clear next step (CTA). Match the numeric values shown above exactly. Keep replies short and culturally appropriate."
 #     prompt = "\n".join(["SYSTEM PROMPT (few-shot examples):", fs, input_block, instruction])
 
-#     logger.debug("[llm_phraser] phrase() computed_action=%s final_price=%s prod=%s lang=%s floor=%s prev_proposals=%s",
-#                  computed_action, final_price, prod_name, lang_key, floor, prev_proposals)
+#     logger.debug("[llm_phraser] phrase() computed_action=%s final_price=%s prod=%s lang=%s floor=%s prev_proposals=%s customer_name=%s",
+#                  computed_action, final_price, prod_name, lang_key, floor, prev_proposals, customer_name)
 
 #     # Compute ratio for tone selection when templates are used
 #     min_price_for_ratio = None
@@ -818,7 +963,7 @@
 #         key = action_map.get(computed_action, "counter")
 #         try:
 #             tpl_price = final_price if final_price is not None else base_price
-#             rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
+#             rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio, customer_name=customer_name, lang_key=lang_key)
 #             try:
 #                 meta_out = dict(meta or {})
 #                 prev = meta_out.get("prev_proposals", []) or []
@@ -834,7 +979,7 @@
 #         except Exception:
 #             logger.exception("[llm_phraser] template override failed for lang=%s key=%s — falling through", lang_key, key)
 #             # safe fallback to English template to avoid crash
-#             return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio)
+#             return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio, customer_name=customer_name, lang_key=lang_key)
 
 #     # --- REMOTE preferred (English or pidgin) ---
 #     if LLM_MODE == "REMOTE":
@@ -842,7 +987,7 @@
 #         try:
 #             remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
 #             out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
-#             if out and (final_price is None or _reply_contains_price(out, final_price) or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+#             if out and (final_price is None or _reply_contains_price(out, final_price)):
 #                 logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
 #                 return out.strip()
 #             logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back")
@@ -853,7 +998,7 @@
 #     if LLM_MODE == "LOCAL":
 #         try:
 #             out = _run_local_generation(prompt)
-#             if out and (final_price is None or _reply_contains_price(out, final_price) or LLM_ALLOW_REMOTE_WITHOUT_PRICE):
+#             if out and (final_price is None or _reply_contains_price(out, final_price)):
 #                 logger.info("[llm_phraser] local_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
 #                 return out.strip()
 #         except Exception:
@@ -865,14 +1010,18 @@
 #     key = action_map.get(computed_action, "counter")
 #     try:
 #         tpl_price = final_price if final_price is not None else base_price
-#         logger.info("[llm_phraser] final_template lang=%s action=%s price=%s prod=%s prev_proposals=%s floor=%s",
-#                     lang_key, computed_action, tpl_price, prod_name, prev_proposals, floor)
-#         return _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
+#         logger.info("[llm_phraser] final_template lang=%s action=%s price=%s prod=%s prev_proposals=%s floor=%s customer_name=%s",
+#                     lang_key, computed_action, tpl_price, prod_name, prev_proposals, floor, customer_name)
+#         return _render_template_reply(template_map, key, tpl_price, prod_name, ratio, customer_name=customer_name, lang_key=lang_key)
 #     except Exception:
 #         try:
+#             if customer_name:
+#                 return f"{customer_name}, Our counter price is {_format_naira(final_price)} for {prod_name}."
 #             return f"Our counter price is {_format_naira(final_price)} for {prod_name}."
 #         except Exception:
 #             return f"Our counter price is ₦{final_price} for {prod_name}."
+
+
 
 
 
@@ -981,9 +1130,9 @@ def _sanitize_context(ctx: Optional[str]) -> str:
 # These are compact high-signal tokens to detect if text is likely Yoruba/Hausa/Igbo.
 # We keep the list conservative so we don't over-trigger.
 _CTX_MARKERS: Dict[str, List[str]] = {
-    "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "rá", "rà", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
+    "yo": ["mo", "le", "san", "ra", "rà", "rá", "ṣe", "jẹ", "kọ"],  # common short tokens in Yoruba phrases
     "ha": ["zan", "iya", "biya", "sayi", "saya", "naira", "ka", "zai"],          # Hausa clues
-    "ig": ["enwere", "nwoke", "nne", "nwanne", "zụta", "zuta", "daalụ", "ị", "na"],  # Igbo clues (conservative)
+    "ig": ["enwere", "nwoke", "nne", "nwanne", "daalụ", "ị", "na"],  # Igbo clues (conservative)
 }
 _CTX_WORD_RE = re.compile(r"\b\w+\b", re.UNICODE)
 
@@ -1100,6 +1249,8 @@ def _call_remote_llm(prompt: str, timeout: int = None, lang_key: str = "en") -> 
     """
     Calls the configured remote LLM provider.
     lang_key en|pcm used to force remote response language (en or pcm).
+    If lang_key == 'pcm' the system prompt instructs the remote model to reply with
+    the single token '<UNABLE_PCM>' if it cannot respond in Pidgin; caller will fallback.
     """
     provider = LLM_REMOTE_PROVIDER.upper()
     headers = _auth_headers()
@@ -1122,9 +1273,17 @@ def _call_remote_llm(prompt: str, timeout: int = None, lang_key: str = "en") -> 
         logger.warning("[llm_phraser] No Authorization header set for provider=%s — remote call may be rejected", provider)
 
     if lang_key == "pcm":
-        remote_sys_lang = "You MUST reply only in Nigerian Pidgin (pcm). Do not include English."
+        # Strong instruction for PCM + sentinel fallback
+        remote_sys_lang = (
+            "You MUST reply only in Nigerian Pidgin (pcm). Do not include English. "
+            "Use short, market-seller style. If you cannot produce the reply in Nigerian Pidgin exactly, "
+            "respond with the single token: <UNABLE_PCM>"
+        )
     else:
-        remote_sys_lang = "You MUST reply only in English (do not include other languages)."
+        remote_sys_lang = (
+            "You MUST reply only in English (do not include other languages). "
+            "Use short, market-seller style. If you cannot produce the reply in English exactly, respond with a single token <UNABLE_EN>"
+        )
 
     def _try_post(cur_url: str) -> Optional[requests.Response]:
         try:
@@ -1210,122 +1369,218 @@ def _run_local_generation(prompt: str) -> Optional[str]:
         logger.exception("[llm_phraser] local generation failed: %s", e)
         return None
 
-# ------------------ templates (unchanged structure, lists allowed) ------------------
+# ------------------ templates (from provided TEMPLATES) ------------------
 _TEMPLATES = {
     "en": {
         "accept": [
-            "My dear, deal done! ₦{price:,} for {product}, you’ll shine! Pay now!",
-            "Thank you, we’re set! ₦{price:,} for {product}, grab it quick!"
+            "Deal done — ₦{price:,} for {product}. Solid choice. Ready when you are.",
+            "Price locked: ₦{price:,} for {product}. Don’t sleep on this — confirm payment.",
+            "It’s a yes! ₦{price:,} for {product}. You pay, I seal the deal.",
+            "Sweet deal: ₦{price:,} for {product}. Secure it now and thank me later.",
+            "Aunty/Uncle approved — ₦{price:,} for {product}. Complete payment to seal."
         ],
         "counter": [
-            "Nice try, but let’s do ₦{price:,} for {product}. Take it now!",
-            "I hear you! Best I can do is ₦{price:,} for {product}. Buy now?"
+            "I can meet you at ₦{price:,} for {product}. Fair offer — you in?",
+            "Closest I can go is ₦{price:,} for {product}. Take it and prosper.",
+            "I stretch to ₦{price:,} for {product} — that’s my best. Oya decide.",
+            "Make it ₦{price:,} for {product} and we’re shaking hands. Shall we?",
+            "I’ll drop to ₦{price:,} for {product} but that’s the floor. Grab?"
         ],
         "reject": [
-            "Ouch, too low for {product}! Best is ₦{price:,}, don’t miss it!",
-            "That price no fit o! ₦{price:,} for {product}, let’s deal!"
+            "Sorry, can’t take that — {product} needs at least ₦{price:,}. Let’s be realistic.",
+            "That offer won’t cut it. I need ₦{price:,} for {product}. Try again?",
+            "Too low, friend — ₦{price:,} is the honest price for {product}.",
+            "I can’t accept that; {product} value is ₦{price:,}. Think it over.",
+            "Not workable — lowest is ₦{price:,} for {product}. Come back if you can."
         ],
         "clarify": [
-            "What price are you thinking for {product}? Share now, let’s deal!",
-            "My friend, what’s your budget for {product}? Let me know!"
+            "What price are you thinking for {product}? Tell me a number.",
+            "How much are you thinking for {product}? Give me your best offer.",
+            "Help me understand — what’s your budget for {product}?",
+            "State the price you want for {product} and I’ll respond.",
+            "What’s your best offer for {product}? Speak now so we move fast."
         ]
     },
-    "pcm": {
+
+    "pcm": {  # Nigerian Pidgin
         "accept": [
-            "Correct deal! ₦{price:,} for {product}, e go sweet you! Pay sharp!",
-            "Na so! ₦{price:,} for {product}, you go love am! Buy now!"
+            "Na deal! ₦{price:,} for {product}. Correct choice. You go make payment now?", 
+            "Price set: ₦{price:,} for {product}. No dulling — make I receive alert nah.", 
+            "Yes o! ₦{price:,} for {product}. You pay, I package am, no dulling.", 
+            "Gbedu done: ₦{price:,} for {product}. Oya send money make I arrange am for you sharp sharp.", 
+            "I dey with you — ₦{price:,} for {product}. Make you pay to lock."
         ],
         "counter": [
-            "You try, but I fit do ₦{price:,} for {product}. Oya, take am!",
-            "No wahala, I go give ₦{price:,} for {product}. You dey in?",
+            "I fit give ₦{price:,} for {product}. E balance — you ready?",
+            "Closest I go down na ₦{price:,} for {product}. Oya take am.",
+            "I go drop to ₦{price:,} for {product}, that one be my last.",
+            "Make we meet for ₦{price:,} for {product}. Na fair play.",
+            "I fit accept ₦{price:,} for {product}, na small small we dey do market." 
         ],
         "reject": [
-            "Haba, dat one too small for {product}! ₦{price:,}, abeg grab am!",
-            "No way o, {product} worth ₦{price:,}! Oya, make we talk business!"
+            "Haba, dat one too small — {product} need ₦{price:,}. You sef think am nah.", 
+            "Ah my oga go sack me if I accept that price — ₦{price:,} na minimum for {product}.", 
+            "That offer no correct. I need ₦{price:,} for {product}.",
+            "E no go work — lowest na ₦{price:,} for {product}.",
+            "Abeg, dat price no reach. ₦{price:,} be the real one."
         ],
         "clarify": [
-            "Abeg, wetin price you dey reason for {product}? Talk quick!",
-            "Bros, which price you dey eye for {product}? Tell me now!"
+            "Which price you dey reason for {product}? Tell me now.",
+            "How much you fit pay for {product}? Give figure.",
+            "Wetin be your budget for {product}? Make we yan.",
+            "Give your best price for {product} so we fit move.",
+            "Abeg state the price you want for {product} — quick answer."
         ]
     },
-    "yo": {
+
+    "yo": {  # Yoruba
         "accept": [
-            "O ṣeun! ₦{price:,} fún {product}, ẹ rẹwà pẹ̀lú rẹ̀! Ra báyìí!",
-            "Ẹ ṣé, a ti ṣe! ₦{price:,} fún {product}, kíá ra ni!",
+            "Ẹ̀wẹ̀ — ₦{price:,} fún {product}. Oun tí ó dá. Tẹ̀ síwájú kí o san.",
+            "Iye ti a tẹ̀sí: ₦{price:,} fún {product}. Má ṣe fà áyá — ra bayìí.",
+            "Ó dá! ₦{price:,} fún {product}. San, a máa ranṣẹ́.",
+            "Ìpinnu wà: ₦{price:,} fún {product}. Gba kíákíá.",
+            "Mo fọwọ́sowọ́ pọ̀ — ₦{price:,} fún {product}. San láti fi dékun."
         ],
         "counter": [
-            "Ó dá, ṣùgbọ́n mo lè gba ₦{price:,} fún {product}. Ṣé ẹ rà?",
-            "Ẹ̀gbọ́n, mo lè fun ọ ni ₦{price:,} fún {product}. Ra kíákíá!",
+            "Mo lè gba ₦{price:,} fún {product}. Ṣe o nífẹ̀ẹ́?",
+            "Ìwọ̀n tó sunmọ̀ jẹ́ ₦{price:,} fún {product}. Oya, gba.",
+            "Mo dínkù sí ₦{price:,} fún {product}, ìyẹn ni ìpinnu mi.",
+            "Ṣe ₦{price:,} fún {product} kí a lè pari ìsọ̀kan.",
+            "Èmi yóò gba ₦{price:,} fún {product} — ìyẹn ni àfojúsùn mi."
         ],
         "reject": [
-            "Há, kéré jù fún {product}! ₦{price:,} ni mo lè gba, má ṣe yọ̀ọ̀!",
-            "Kò tó fún {product}! ₦{price:,} ni, jọ̀ọ́, ṣé ẹ rà?",
+            "Rárá, kò tó — {product} tọ́ ₦{price:,}. Jọwọ ròyìn.",
+            "Ibere ko wulo. Mo nilo ₦{price:,} fún {product}.",
+            "Kò ṣeé gba — iye kéré. ₦{price:,} ni otitọ.",
+            "Ẹ jọ̀, ìfilọ́lẹ̀ yìí kì í dé. ₦{price:,} ni mo lè gba.",
+            "Ó kéré ju — ìwọ lè tún rò, ₦{price:,} ni ìwòye mi."
         ],
         "clarify": [
-            "Jọ̀ọ́, mélòó ni ẹ rò fún {product}? Sọ fún mi kíákíá!",
-            "Ẹ̀gbọ́n, kí ni ìdíwọ̀n rẹ fún {product}? Sọ báyìí!"
+            "Ṣé mélòó ni o rò fún {product}? Sọ fún mi.",
+            "Kí ni ìsúná rẹ fún {product}? Jẹ́ kó ye mi.",
+            "Ẹ sọ iye tí o lè san fún {product}, má fi dúró.",
+            "Ṣe o lè fi owó kan ṣàpèjúwe? ₦… fún {product}?",
+            "Jọwọ, sọ iye rẹ fún {product} kí a lè bá a ṣèrànwọ́."
         ]
     },
-    "ha": {
+
+    "ha": {  # Hausa
         "accept": [
-            "Nagode! ₦{price:,} domin {product}, zai sa ka haske! Saya yanzu!",
-            "Na gode, mun gama! ₦{price:,} don {product}, ka saya da sauri!",
+            "Nagode — ₦{price:,} don {product}. Kyakkyawan zabi. Sai ka biya.",
+            "Farashi an kulle: ₦{price:,} don {product}. Ka tabbatar da biyan kuɗi.",
+            "Eh, mun amince! ₦{price:,} don {product}. Ka biya, mu shirya.",
+            "Yau dai: ₦{price:,} don {product}. Kar ka bari ya wuce.",
+            "Na amince — ₦{price:,} don {product}. Biya yanzu ka tabbatar."
         ],
         "counter": [
-            "Ka ji, amma zan iya ₦{price:,} don {product}. Ka saya yanzu?",
-            "Nagode, zan iya baka ₦{price:,} don {product}. Shin za ka saya?",
+            "Zan iya ₦{price:,} don {product}. Wannan mafi kusa ne.",
+            "Mafi kusa da ni: ₦{price:,} don {product}. Ka yanke shawara.",
+            "Zan sauƙaƙa zuwa ₦{price:,} don {product}, wannan ne iyaka.",
+            "Ka kawo ₦{price:,} don {product} sai mu gama.",
+            "Ina iya bada ₦{price:,} don {product}, amintacce ne."
         ],
         "reject": [
-            "Haba, wannan ƙasa ga {product}! ₦{price:,}, ka ji yanzu!",
-            "Farashin bai isa ba ga {product}! ₦{price:,}, ka saya ko?",
+            "Yi haƙuri, wannan ƙasa ne — {product} na ₦{price:,}.",
+            "Ba zan iya karɓa ba. Ina bukatar ₦{price:,} don {product}.",
+            "Farashin bai isa ba. ₦{price:,} shine gaskiya.",
+            "Ba zai yiwu ba — mafi ƙasa shine ₦{price:,} don {product}.",
+            "Kayi haƙuri, wannan tayi ba zata yi ba. ₦{price:,} ne."
         ],
         "clarify": [
-            "Don Allah, wane farashi kake tunani don {product}? Fada min yanzu!",
-            "Aboki, wane farashi kake so don {product}? Ka gaya min!",
+            "Wane farashi kake tunani don {product}? Fada min.",
+            "Menene kasafin kuɗin ku don {product}? Ka gaya min.",
+            "Don Allah fa, mene ne adadin da zaka iya biya?",
+            "Bayyana farashin da kake so don {product}, mu tattauna.",
+            "Fada min adadin da zaka iya biya don {product} yanzu."
         ]
     },
-    "ig": {
+
+    "ig": {  # Igbo
         "accept": [
-            "Daalụ! ₦{price:,} maka {product}, ọ ga-eme gị ka ọgaranya! Zụta ugbu a!",
-            "Ekele, anyị kwụsịrị! ₦{price:,} maka {product}, zụta ngwa ngwa!",
+            "Daalụ — ₦{price:,} maka {product}. Nhọrọ ọma. Banye kwụọ.",
+            "E jidere ọnụahịa: ₦{price:,} maka {product}. Biko kwụọ ụgwọ.",
+            "Ọ dị mma! ₦{price:,} maka {product}. Kwụọ, anyị ga-eziga.",
+            "Emeela: ₦{price:,} maka {product}. Nwee obi ike, zụta ugbu a.",
+            "Ana m akwado — ₦{price:,} maka {product}. Kwụọ ka e mechaa."
         ],
         "counter": [
-            "Ị dị mma, mana m nwere ike inye ₦{price:,} maka {product}. Zụta ugbu a?",
-            "Daalụ, enwere m ike ịnye ₦{price:,} maka {product}. Ị dị njikere?",
+            "Enwere m ike ime ₦{price:,} maka {product}. Nke a kacha nso.",
+            "Ihe kacha m nwee bụ ₦{price:,} maka {product}. Ị nọ n’aka?",
+            "M ga-ebelata ruo ₦{price:,} maka {product}, nke a bụ ikpeazụ.",
+            "Mee ka ọ bụrụ ₦{price:,} maka {product} ka anyị kwụsịtụ.",
+            "Anọ m na ₦{price:,} maka {product} — ọ bụ ezi onyinye."
         ],
         "reject": [
-            "Haba, ọnụahịa a dị ala maka {product}! ₦{price:,}, biko zụta ya!",
-            "Ọ dịghị mma maka {product}! ₦{price:,} ka m nwere, zụta ugbu a!",
+            "Ndo, nke ahụ adịghị eru — {product} dị ₦{price:,}.",
+            "Agaghị m anabata nke ahụ. Achọrọ m ₦{price:,} maka {product}.",
+            "Ego ahụ dị ala. ₦{price:,} bụ ezi ọnụahịa.",
+            "O nweghị ụzọ — ala kacha nta bụ ₦{price:,} maka {product}.",
+            "Biko tụlee ọzọ, ọnụahịa kwesịrị ịbụ ₦{price:,}."
         ],
         "clarify": [
-            "Biko, kedụ ọnụahịa ị na-eche maka {product}? Kwee ngwa ngwa!",
-            "Nna, gịnị ka ị chọrọ maka ọnụahịa {product}? Kwee m ugbu a!"
+            "Kedụ ọnụahịa ị na-eche maka {product}? Gwa m.",
+            "Kedu ego ị nwere maka {product}? Kọwaa.",
+            "Biko, tinyekwuo ego ị ga-akwụ maka {product}.",
+            "Gosi ọnụahịa kacha mma gị maka {product}. Ka anyị kwuo.",
+            "Kedụ ọnụahịa ị na-enye maka {product}? Zaghachi ngwa ngwa."
         ]
     }
 }
 
 FEW_SHOT_PROMPT = """
-    SYSTEM: You are a vibrant Nigerian market seller and expert negotiator, fluent in English (en), Pidgin (pcm), Yoruba (yo), Hausa (ha), and Igbo (ig), speaking like a native with authentic market energy. Use {lang_key} tone (short, direct, rich with Nigerian charm and banter).
-        - Detect if a customer is speaking to you in Yoruba, English, Pidgin, Igbo, Hausa, or mixed languages and reply in the same language
+SYSTEM: You are a lively Nigerian market seller, a sharp negotiator bursting with authentic swagger, fluent in English (en), Pidgin (pcm), Yoruba (yo), Hausa (ha), and Igbo (ig). Speak like a native with bold market energy, using {lang_key} tone (short, punchy, dripping with Nigerian charm and banter).
 
-        - Infuse replies with Nigerian market flair: use slang, proverbs, or playful haggling to build trust and warmth.
+LANGUAGE RULE (mandatory):
+ - Reply ONLY in the language the user uses in their message (English, Pidgin, Yoruba, Igbo, or Hausa).
+ - If the user mixes languages, detect the dominant language and reply in that dominant language. You MAY mirror short mixed phrases sparingly **only if the user mixed**. Do NOT introduce mixed-language content otherwise.
+ - If the user’s language is not detectable or unsupported, default to English with Nigerian seller flair.
 
-        - Appeal to emotions (gratitude, community, pride) to persuade
+GOALS:
+ - Keep replies short: 1–2 sentences, maximum 40 words.
+ - Be persuasive using warmth, light humour, and culturally natural banter — but never rude or abusive.
+ - Protect seller margin: be firm but polite; when refusing an offer, always offer a forward path (a counter or next step).
+ - Vary phrasing: rotate among templates and CTAs so responses don’t repeat the exact same line across interactions.
+  
+PRICING & NUMBERS (strict):
+ - Always use the currency symbol ₦.
+ - If {final_price} is provided, **echo the numeric price exactly as given** (do not reformat or invent decimals). Use {final_price} verbatim where required.
+ - If {final_price} is NOT provided, format the price as a whole-naira integer with comma separators (e.g., 1,250) when rendering templates and replies.
+ - Always include the numeric price and the product name somewhere in the reply.
+ - Numeric reinforcement: you MAY repeat the numeric price once for emphasis (e.g., “₦15,000 — yes, ₦15,000”), but keep the reply within length limits.
 
-        - Be firm yet polite to protect seller margin and brand value.
+NEGOTIATION BEHAVIOR:
+ - ACCEPT: use an acceptance template, express brief gratitude/energy, echo the price (prefer {final_price} when provided), include CTA to pay/confirm.
+ - COUNTER: propose a single clear counter price (one number only), explain briefly if needed, end with CTA.
+ - REJECT: politely refuse, state the honest minimum (prefer using {final_price} when available or the computed minimum), then immediately present a path (e.g., “I can do ₦X” or “Come back if you can reach ₦X”).
+ - CLARIFY: ask for a numeric offer or budget in the user’s language; be short and direct.
 
-        - Use currency symbol ₦ and round prices to whole naira.
+STYLE RULES:
+ - Tone by language: 
+   - English = savvy, confident, with market swagger.
+   - Pidgin = playful, street-smart, chop-life vibe.
+   - Yoruba = warm, respectful, with local proverbs.
+   - Hausa = polite, direct, with community warmth.
+   - Igbo = friendly, persuasive, with trader’s charm.
+ - Keep replies punchy, avoid long explanations. Use 1–2 short clauses.
+ - Do not invent shipping, freebies, discounts, or timelines unless specified.
+ - Mirror short mixed-language phrases only if user mixes; reply in dominant language.
 
-        - Keep replies short (1-2 sentences, max 40 words). End with a clear CTA.
-
-        - Do not invent shipping, freebies, or discounts.
-
-        - Echo numeric prices exactly as provided in {final_price}.
-
-Context: {context}
+CONTEXT: {context}
 
 NUMERIC_GROUNDS:
-final_price: {final_price}
+ final_price: {final_price}
+
+OPERATIONS EXAMPLES (behavioural):
+ - If user accepts and final_price is 15000 → reply with acceptance phrase echoing ₦15000 and a CTA.
+ - If user counters with an offer → reply with one-number counter (₦X), short rationale optional, end with CTA.
+ - If user offers too low → politely state the computed minimum or {final_price} (if provided) and offer a compromise or next step.
+
+IMPLEMENTATION NOTES:
+ - Rotate templates so the same template is not reused back-to-back for the same user.
+ - Keep replies short enough for chat UI bubbles; prioritize clarity and action.
+ - If unsure about language detection, default to English with Nigerian market persona and ask for clarification only once, concisely.
+
+Final instruction: Use this prompt plus the TEMPLATES for {lang_key} as your core. Always be authentic, persuasive, and business-savvy — like a real seller from the market who knows value and respects the customer.
 """
 
 # ------------------ policy (refined) ------------------
@@ -1488,7 +1743,7 @@ def _choose_template_variant(candidate: Any, ratio: Optional[float]) -> str:
             return random.choice(candidate)
     return str(candidate)
 
-def _render_template_reply(template_map: Dict[str, Any], action_key: str, price: Optional[int], product_name: str, ratio: Optional[float] = None) -> str:
+def _render_template_reply(template_map: Dict[str, Any], action_key: str, price: Optional[int], product_name: str, ratio: Optional[float] = None, customer: Optional[str] = None) -> str:
     try:
         candidate = template_map.get(action_key, template_map.get("counter"))
         tmpl = _choose_template_variant(candidate, ratio)
@@ -1499,7 +1754,9 @@ def _render_template_reply(template_map: Dict[str, Any], action_key: str, price:
             tpl_price_int = int(price) if price is not None else 0
         except Exception:
             tpl_price_int = 0
-        return tmpl.format(price=tpl_price_int, product=product_name)
+        cust = customer or "friend"
+        # allow templates to optionally include {customer}
+        return tmpl.format(price=tpl_price_int, product=product_name, customer=cust)
     except Exception as e:
         logger.exception("[llm_phraser] template rendering failed: %s", e)
         try:
@@ -1547,6 +1804,13 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
 
     prod_name = product.get("name") or product.get("id") or "product"
     base_price = int(product.get("base_price", 0))
+
+    # optional customer name from kwargs
+    customer_name = None
+    if "customer_name" in kwargs:
+        customer_name = kwargs.get("customer_name")
+    elif "customer" in kwargs:
+        customer_name = kwargs.get("customer")
 
     # read decision fields
     explicit_action = (decision.get("action") or "").upper() or None
@@ -1657,7 +1921,7 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
         key = action_map.get(computed_action, "counter")
         try:
             tpl_price = final_price if final_price is not None else base_price
-            rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
+            rendered = _render_template_reply(template_map, key, tpl_price, prod_name, ratio, customer_name)
             try:
                 meta_out = dict(meta or {})
                 prev = meta_out.get("prev_proposals", []) or []
@@ -1673,7 +1937,7 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
         except Exception:
             logger.exception("[llm_phraser] template override failed for lang=%s key=%s — falling through", lang_key, key)
             # safe fallback to English template to avoid crash
-            return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio)
+            return _render_template_reply(_TEMPLATES.get("en"), "counter", final_price or base_price, prod_name, ratio, customer_name)
 
     # --- REMOTE preferred (English or pidgin) ---
     if LLM_MODE == "REMOTE":
@@ -1681,10 +1945,19 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
         try:
             remote_lang_forcing = "en" if lang_key not in ("pcm",) else "pcm"
             out = _call_remote_llm(prompt, lang_key=remote_lang_forcing)
-            if out and (final_price is None or _reply_contains_price(out, final_price)):
-                logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
-                return out.strip()
-            logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back")
+            if out:
+                # If PCM mode: handle sentinel <UNABLE_PCM> -> fallback to templates
+                if remote_lang_forcing == "pcm" and out.strip() == "<UNABLE_PCM>":
+                    logger.info("[llm_phraser] remote signalled UNABLE_PCM; falling back to templates")
+                else:
+                    # numeric safety: must contain final_price when final_price provided
+                    if final_price is None or _reply_contains_price(out, final_price):
+                        logger.info("[llm_phraser] remote_generation_ok lang=%s preview=%s", lang_key, (out[:120] + "...") if len(out) > 120 else out)
+                        return out.strip()
+                    else:
+                        logger.warning("[llm_phraser] remote returned no usable text or numeric mismatch; falling back")
+            else:
+                logger.warning("[llm_phraser] remote returned empty response; falling back")
         except Exception:
             logger.exception("[llm_phraser] remote generation error")
 
@@ -1704,11 +1977,13 @@ def phrase(decision: Dict[str, Any], product: Dict[str, Any], lang: str = "en", 
     key = action_map.get(computed_action, "counter")
     try:
         tpl_price = final_price if final_price is not None else base_price
-        logger.info("[llm_phraser] final_template lang=%s action=%s price=%s prod=%s prev_proposals=%s floor=%s",
-                    lang_key, computed_action, tpl_price, prod_name, prev_proposals, floor)
-        return _render_template_reply(template_map, key, tpl_price, prod_name, ratio)
+        logger.info("[llm_phraser] final_template lang=%s action=%s price=%s prod=%s prev_proposals=%s floor=%s customer_name=%s",
+                    lang_key, computed_action, tpl_price, prod_name, prev_proposals, floor, customer_name)
+        return _render_template_reply(template_map, key, tpl_price, prod_name, ratio, customer_name=customer_name, lang_key=lang_key)
     except Exception:
         try:
+            if customer_name:
+                return f"{customer_name}, Our counter price is {_format_naira(final_price)} for {prod_name}."
             return f"Our counter price is {_format_naira(final_price)} for {prod_name}."
         except Exception:
             return f"Our counter price is ₦{final_price} for {prod_name}."

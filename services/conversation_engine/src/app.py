@@ -1,33 +1,42 @@
 # services/conversation_engine/src/app.py
 """
-Adapter shim so `uvicorn app:app` (the wrapper) can find the real ASGI app.
-This re-exports `app` from the core implementation (where your real app lives).
-It tolerantly tries likely paths so it works whether the implementation is at
-conversation_engine.core.app or conversation_engine.src.core.app.
+Robust adapter so `uvicorn app:app` (and the wrapper) can find the real ASGI app.
+We try a number of absolute module names (both core.app and src.core.app) and
+re-export the found `app` object.
 """
+import importlib
+import logging
 from typing import Optional
+
+logger = logging.getLogger("conversation_engine.app_adapter")
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 _app: Optional[object] = None
 
-# try core.app first (most likely)
-try:
-    from .core.app import app as _app  # type: ignore
-except Exception:
-    _app = None
+candidates = [
+    "conversation_engine.core.app",
+    "conversation_engine.src.core.app",
+    "conversation_engine.app",
+    "conversation_engine.src.core",   # try module exposing app at package-level
+    "conversation_engine.core",       # same as above
+]
 
-# fallback to src.core.app (older layouts)
-if _app is None:
+for cname in candidates:
     try:
-        from .src.core.app import app as _app  # type: ignore
-    except Exception:
-        _app = None
+        mod = importlib.import_module(cname)
+        if hasattr(mod, "app"):
+            _app = getattr(mod, "app")
+            logger.info("Re-exporting ASGI app from module %s", cname)
+            break
+    except Exception as e:
+        logger.debug("Failed to import %s: %s", cname, e)
 
-# expose `app` symbol expected by uvicorn wrapper
-if _app is not None:
-    app = _app  # re-export
-else:
-    # keep failure obvious in logs if we ever import this module
+if _app is None:
     raise ImportError(
         "Could not re-export ASGI `app` from conversation_engine; "
-        "check conversation_engine.core.app or conversation_engine.src.core.app"
+        "tried: %s" % (", ".join(candidates),)
     )
+
+# publish symbol uvicorn expects
+app = _app  # type: ignore

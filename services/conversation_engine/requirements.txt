@@ -4,3 +4,4 @@ fasttext
 pydantic
 pytest
 requests
+redis>=4.5.0

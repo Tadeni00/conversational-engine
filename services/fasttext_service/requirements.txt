@@ -1,0 +1,4 @@
+fastapi
+uvicorn[standard]
+numpy<2.0,>=1.24
+fasttext==0.9.3

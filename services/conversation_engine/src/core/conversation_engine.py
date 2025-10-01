@@ -37,7 +37,7 @@ def _ensure_catalog_loaded():
 
 def handle_message(conversation_id: str, user_id: str, text: str, product_id: str | None = None) -> EngineOutput:
     text_norm = normalize_text(text)
-    lang, lang_conf = detect_language(text_norm)
+    lang, lang_conf = detect_language(text_norm, user_id=user_id)
     intent, intent_conf = classify_intent(text_norm, lang)
     offer = parse_amount(text_norm)
 

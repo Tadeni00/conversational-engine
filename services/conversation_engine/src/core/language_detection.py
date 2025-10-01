@@ -5,6 +5,8 @@ See docstring at top for behavior & environment.
 from __future__ import annotations
 from typing import Tuple, Optional, Dict
 import os, re, threading, logging
+import unicodedata
+from .language_pref import get_user_lang_pref
 
 logger = logging.getLogger("language_detection")
 if not logger.handlers:
@@ -18,29 +20,30 @@ _FASTTEXT_SERVICE_URL = os.getenv("FASTTEXT_SERVICE_URL", "").strip()
 _FASTTEXT_SERVICE_TIMEOUT = float(os.getenv("FASTTEXT_SERVICE_TIMEOUT", "2.0"))
 
 # Override thresholds (tunable via env)
-_CONF_OVERRIDE_THRESHOLD = float(os.getenv("LANG_DETECT_CONF_THRESHOLD", "0.95"))
-_EVIDENCE_THRESHOLD = float(os.getenv("LANG_DETECT_EVIDENCE_THRESHOLD", "0.5"))
+_CONF_OVERRIDE_THRESHOLD = float(os.getenv("LANG_DETECT_CONF_THRESHOLD", "0.90"))
+_EVIDENCE_THRESHOLD = float(os.getenv("LANG_DETECT_EVIDENCE_THRESHOLD", "0.45"))
 _STRONG_WEIGHT = float(os.getenv("LANG_DETECT_STRONG_WEIGHT", "1.5"))
 _WEAK_WEIGHT = float(os.getenv("LANG_DETECT_WEAK_WEIGHT", "0.6"))
-_STRONG_AUTO_OVERRIDE_THRESHOLD = float(os.getenv("LANG_DETECT_STRONG_AUTO_THR", "2.5"))
+_STRONG_AUTO_OVERRIDE_THRESHOLD = float(os.getenv("LANG_DETECT_STRONG_AUTO_THR", "2.0"))
 _OVERRIDE_CONFIDENCE = float(os.getenv("LANG_DETECT_OVERRIDE_CONF", "0.85"))
 
 # NEW: low-confidence trust threshold for non-English fastText predictions
-_LOW_CONF_TRUST = float(os.getenv("LANG_DETECT_LOW_CONF_TRUST", "0.6"))
+_LOW_CONF_TRUST = float(os.getenv("LANG_DETECT_LOW_CONF_TRUST", "0.60"))
 
 # -------------------------------------------------------------------
-# Marker dictionaries
+# Marker dictionaries (expanded Pidgin markers; conservative additions for local langs)
 # -------------------------------------------------------------------
-STRONG_MARKERS_PCM = {"abi", "una", "wahala", "sef", "abeg", "jare", "omo", "no be", "How much for"}
-WEAK_MARKERS_PCM   = {"fit", "dey", "go", "chop", "make", "come", "waka", "na", "biko"}
+# Note: keep these conservative. You can add more words/phrases via config if needed.
+STRONG_MARKERS_PCM = {"abi", "una", "wahala", "sef", "abeg", "jare", "omo", "no be", "how much for", "oya", "sharpy"}
+WEAK_MARKERS_PCM   = {"fit", "dey", "go", "chop", "make", "come", "waka", "na", "biko", "i fit", "e go", "you go"}
 
-STRONG_MARKERS_YO  = {"ẹkọ", "ọ̀sán", "ilé", "báwo", "àwọn"}
-WEAK_MARKERS_YO    = {"lọ", "jẹ", "ni", "sí"}
+STRONG_MARKERS_YO  = {"ẹkọ", "ọ̀sán", "ilé", "báwo", "àwọn", "rà", "rá", "jẹ"}
+WEAK_MARKERS_YO    = {"lọ", "jẹ", "ni", "sí", "ra"}
 
-STRONG_MARKERS_IG  = {"nwoke", "nne", "nwanne", "ihe", "oba"}
-WEAK_MARKERS_IG    = {"ga", "na", "so"}
+STRONG_MARKERS_IG  = {"nwoke", "nne", "nwanne", "ihe", "oba", "daalụ", "ị"}
+WEAK_MARKERS_IG    = {"ga", "na", "so", "ka"}
 
-STRONG_MARKERS_HA  = {"ina", "kai", "yau", "don"}
+STRONG_MARKERS_HA  = {"ina", "kai", "yau", "don", "naira"}
 WEAK_MARKERS_HA    = {"ne", "da", "na"}
 
 LANG_MARKERS = {
@@ -50,11 +53,25 @@ LANG_MARKERS = {
     "ha":  (STRONG_MARKERS_HA,  WEAK_MARKERS_HA),
 }
 
-_TOKEN_RE = re.compile(r"\b\w+'?\w*|\b\w+\b", re.UNICODE)
+# improved token regex: allow apostrophes and accented characters
+_TOKEN_RE = re.compile(r"\b[\w']+\b", re.UNICODE)
+
+
+def _strip_diacritics(s: str) -> str:
+    """Normalize to NFKD and remove combining marks for robust matching."""
+    if not s:
+        return s
+    nk = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in nk if not unicodedata.combining(ch))
 
 
 def _tokenize(text: str):
-    return [t.lower() for t in _TOKEN_RE.findall(text)]
+    # Lowercase + diacritics-stripped tokens for matching
+    if not text:
+        return []
+    s = text.lower()
+    s = _strip_diacritics(s)
+    return [t for t in _TOKEN_RE.findall(s)]
 
 
 # -------------------------------------------------------------------
@@ -118,6 +135,12 @@ def _normalize_lang_code(l: str) -> str:
         return "en"
     if l in ("pidgin", "pcm_ng", "pcm-nigeria", "pcm"):
         return "pcm"
+    # fastText sometimes returns "__label__pcm" or similar
+    if l.startswith("__label__"):
+        return _normalize_lang_code(l.replace("__label__", ""))
+    # unknown noisy labels like "<UNABLE_PCM>" -> treat as unknown
+    if l.startswith("<") and l.endswith(">"):
+        return "unknown"
     return l
 
 
@@ -142,23 +165,33 @@ def decide_language_with_override(
       - meta (dict)
     """
     t = (text or "").strip()
-    tokens = _tokenize(t)
-    token_set = set(tokens)
+    token_list = _tokenize(t)
+    token_set = set(token_list)
+    low_text = _strip_diacritics(t.lower())
 
     # compute evidence scores for each candidate local language
     scores: Dict[str, float] = {}
     per_lang_counts: Dict[str, Dict[str, int]] = {}
     for lang, (strong_markers, weak_markers) in LANG_MARKERS.items():
-        # strong counts: allow substring matches for multi-word markers like "no be"
+        # strong counts: allow substring matches for multi-word markers
         strong_count = 0
         for m in strong_markers:
-            if " " in m:
-                if m in t.lower():
+            m_norm = _strip_diacritics(m.lower())
+            if " " in m_norm:
+                if m_norm in low_text:
                     strong_count += 1
             else:
-                if m in token_set:
+                if m_norm in token_set:
                     strong_count += 1
-        weak_count = sum(1 for m in weak_markers if m in token_set)
+        weak_count = 0
+        for m in weak_markers:
+            m_norm = _strip_diacritics(m.lower())
+            if " " in m_norm:
+                if m_norm in low_text:
+                    weak_count += 1
+            else:
+                if m_norm in token_set:
+                    weak_count += 1
         per_lang_counts[lang] = {"strong": strong_count, "weak": weak_count}
         scores[lang] = strong_count * strong_weight + weak_count * weak_weight
 
@@ -176,8 +209,9 @@ def decide_language_with_override(
         override = True
         reason = "strong_evidence_auto_override"
     else:
-        # If fastText predicted English, use the earlier conservative logic
-        if fasttext_lang in ("en", "eng"):
+        # If fastText predicted English or unknown, use the conservative override logic
+        if fasttext_lang in ("en", "eng", "unknown"):
+            # require fastText conf below threshold and sufficient evidence
             if fasttext_conf < conf_override_threshold and best_score >= evidence_threshold:
                 final_lang = best_lang
                 override = True
@@ -207,7 +241,7 @@ def decide_language_with_override(
         "override": override,
         "reason": reason,
         "meta": {
-            "tokens": len(tokens),
+            "tokens": len(token_list),
             "evidence_scores": scores,
             "per_lang_counts": per_lang_counts,
             "fasttext_lang": fasttext_lang,
@@ -221,7 +255,18 @@ def decide_language_with_override(
 # -------------------------------------------------------------------
 # Public entrypoint
 # -------------------------------------------------------------------
-def detect_language(text: str) -> Tuple[str, float]:
+def detect_language(text: str, user_id: Optional[str] = None) -> Tuple[str, float]:
+    # 1) Check explicit per-user preference stored in Redis
+    if user_id:
+        try:
+            pref = get_user_lang_pref(user_id)
+            if pref:
+                # Respect user preference strongly (high confidence)
+                return pref, 0.99
+        except Exception:
+            # If Redis fails, continue with normal detection flow
+            pass
+
     txt = (text or "").strip()
     if not txt:
         return "en", 0.5
@@ -243,10 +288,10 @@ def detect_language(text: str) -> Tuple[str, float]:
                 conf = float(raw_conf or 0.0)
 
             # If fastText predicts a non-English language with sufficient confidence, trust it
-            if lang not in ("en", "eng") and conf >= _LOW_CONF_TRUST:
+            if lang not in ("en", "eng", "unknown") and conf >= _LOW_CONF_TRUST:
                 return lang, conf
 
-            # Otherwise (fastText says 'en' OR low-confidence non-en) decide whether to override
+            # Otherwise (fastText says 'en' OR low-confidence non-en or unknown) decide whether to override
             decision = decide_language_with_override(txt, lang, conf)
             if decision["override"]:
                 return decision["final_language"], max(conf, _OVERRIDE_CONFIDENCE)
@@ -264,10 +309,10 @@ def detect_language(text: str) -> Tuple[str, float]:
                     lang = _norm(raw_label.replace("__label__", ""))
 
                     # If fastText predicts non-English with enough confidence, trust it
-                    if lang not in ("en", "eng") and prob >= _LOW_CONF_TRUST:
+                    if lang not in ("en", "eng", "unknown") and prob >= _LOW_CONF_TRUST:
                         return lang, prob
 
-                    # Otherwise (fastText says 'en' or non-en but low-conf) run override
+                    # Otherwise (fastText says 'en' or non-en but low-conf or unknown) run override
                     decision = decide_language_with_override(txt, lang, prob)
                     if decision["override"]:
                         return decision["final_language"], max(prob, _OVERRIDE_CONFIDENCE)

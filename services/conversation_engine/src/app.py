@@ -7,6 +7,8 @@ import logging
 from typing import Optional, Tuple
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from conversation_engine.core.language_pref import set_user_lang_pref, get_user_lang_pref, delete_user_lang_pref
+
 
 logger = logging.getLogger("language-detection")
 if not logger.handlers:
@@ -114,6 +116,7 @@ app = FastAPI(title="language-detection")
 
 class DetectRequest(BaseModel):
     text: Optional[str] = None
+    user_id: Optional[str] = None
 
 class DetectResponse(BaseModel):
     language: str
@@ -122,6 +125,9 @@ class DetectResponse(BaseModel):
 @app.get("/ping")
 def ping():
     return {"status": "ok"}
+
+class SetUserLangRequest(BaseModel):
+    language: str
 
 @app.post("/detect", response_model=DetectResponse)
 def detect(req: DetectRequest):
@@ -133,9 +139,27 @@ def detect(req: DetectRequest):
     if not text:
         return DetectResponse(language="en", confidence=0.5)
 
+    # 0) If caller provided user_id and we have a stored preference, honor it immediately.
+    if getattr(req, "user_id", None):
+        try:
+            pref = get_user_lang_pref(req.user_id)
+            if pref:
+                lang_pref = _normalize_lang_code(pref)
+                logger.info("[language-detection] honor stored user preference -> %s (user_id=%s)", lang_pref, req.user_id)
+                return DetectResponse(language=lang_pref, confidence=0.99)
+        except Exception:
+            # don't fail on Redis errors — fall back to normal detection
+            logger.exception("[language-detection] error reading user lang pref (continuing detection)")
+
+    # Normal detection flow: pass user_id through to the detection function (if it supports it).
     try:
-        raw_lang, conf = detect_language(text)
-        # normalize to short codes used by services
+        # if your detect_language implementation accepts user_id, it will use it; if not, it will ignore extra arg.
+        try:
+            raw_lang, conf = detect_language(text, user_id=req.user_id)
+        except TypeError:
+            # older detect_language signature without user_id — call the old way to keep backward compatibility
+            raw_lang, conf = detect_language(text)
+
         lang = _normalize_lang_code(raw_lang)
         conf = float(conf or 0.0)
         conf = max(0.0, min(1.0, conf))
@@ -144,3 +168,42 @@ def detect(req: DetectRequest):
     except Exception as e:
         logger.exception("language detection runtime error: %s", e)
         raise HTTPException(status_code=500, detail="language detection failed (see service logs)")
+
+@app.post("/user/{user_id}/lang")
+def set_user_lang(user_id: str, body: SetUserLangRequest):
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+
+    # normalize into your canonical short code
+    normalized = _normalize_lang_code(body.language)
+    # optionally, you can restrict to a set of supported languages:
+    SUPPORTED = {"en", "pcm", "yo", "ig", "ha"}
+    if normalized not in SUPPORTED:
+        raise HTTPException(status_code=400, detail=f"unsupported language '{body.language}'")
+
+    try:
+        ok = set_user_lang_pref(user_id, normalized)
+    except Exception:
+        logger.exception("[language-detection] failed to set user lang pref")
+        ok = False
+
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to store user language preference")
+
+    # user-friendly confirmation which your bot/UI can echo to user
+    return {"ok": True, "message": f"Preference saved: replies will be in {normalized}", "language": normalized}
+
+@app.delete("/user/{user_id}/lang")
+def delete_user_lang(user_id: str):
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    try:
+        ok = delete_user_lang_pref(user_id)
+    except Exception:
+        logger.exception("[language-detection] failed to delete user lang pref")
+        ok = False
+
+    if not ok:
+        raise HTTPException(status_code=500, detail="failed to delete user language preference")
+
+    return {"ok": True, "message": "Preference deleted", "user_id": user_id}

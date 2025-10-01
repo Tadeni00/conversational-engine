@@ -1,0 +1,39 @@
+# services/fasttext_service/Dockerfile
+FROM python:3.12-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install required system build tools for fasttext and other pydeps
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      build-essential \
+      cmake \
+      git \
+      wget \
+      curl \
+      ca-certificates \
+      python3-dev \
+      libstdc++6 \
+      autoconf \
+      automake \
+      libtool \
+      pkg-config \
+      ninja-build \
+      meson \
+      libffi-dev \
+      unzip && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY services/fasttext_service/requirements.txt /app/requirements.txt
+
+# Use pip normally (allow binary wheels if available). Building may still compile C code if wheel not available.
+RUN python -m pip install --upgrade pip setuptools wheel && \
+    pip install --no-cache-dir -r /app/requirements.txt
+
+COPY services/fasttext_service /app
+
+EXPOSE 5000
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "5000"]

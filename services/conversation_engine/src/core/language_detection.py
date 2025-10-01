@@ -149,6 +149,7 @@ def decide_language_with_override(
     fasttext_lang: str,
     fasttext_conf: float,
     *,
+
     conf_override_threshold: float = _CONF_OVERRIDE_THRESHOLD,
     evidence_threshold: float = _EVIDENCE_THRESHOLD,
     strong_weight: float = _STRONG_WEIGHT,
@@ -177,6 +178,13 @@ def decide_language_with_override(
         strong_count = 0
         for m in strong_markers:
             m_norm = _strip_diacritics(m.lower())
+
+            # SKIP markers that normalize to a single character (too ambiguous,
+            # e.g. 'ị' -> 'i' would match English pronoun 'I'). This prevents
+            # false positives on short single-letter markers.
+            if len(m_norm) <= 1:
+                continue
+
             if " " in m_norm:
                 if m_norm in low_text:
                     strong_count += 1
@@ -186,6 +194,11 @@ def decide_language_with_override(
         weak_count = 0
         for m in weak_markers:
             m_norm = _strip_diacritics(m.lower())
+
+            # same skip for weak markers
+            if len(m_norm) <= 1:
+                continue
+
             if " " in m_norm:
                 if m_norm in low_text:
                     weak_count += 1

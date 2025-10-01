@@ -1,34 +1,252 @@
-# bring down any stale containers
-docker compose down --remove-orphans || true
-
-# rebuild only the language-detection service and start it
-docker compose build --no-cache language-detection
-docker compose up -d language-detection
-
-# follow logs
-docker compose logs -f language-detection --tail 200
 
 
-# API reachable on host
-curl -sS http://localhost:8000/ping
-curl -sS -X POST http://localhost:8000/detect -H "Content-Type: application/json" -d '{"text":"Hello"}'
+    Quick summary
+
+This repo runs a small microservice stack that:
+
+Detects language of short user messages (English, Pidgin/pcm, Yoruba, Igbo, Hausa).
+
+Lets users set a preferred reply language (stored in Redis with TTL).
+
+Uses a negotiation service that composes localized replies based on the detected/preferred language.
+
+Runs in Docker Compose for easy local development and testing.
+
+Quickstart (run locally)
+
+From repo root:
+
+# build & start core services (fasttext, redis, language-detection, negotiation)
+docker compose up -d --build fasttext-service redis language-detection negotiation
+
+# health check
+curl -sS http://localhost:8000/ping | jq
 
 
+Expected services / ports:
 
-# start the rest of the stack if not already
-docker compose up -d negotiation conversation-engine
+Language detection API: http://localhost:8000
 
-# shell into the negotiation container and test resolution
-docker exec -it conversation_engine-negotiation /bin/sh
-# inside:
-getent hosts language-detection || true
-curl -v --max-time 2 http://language-detection:8000/ping
-exit
+FastText microservice: http://localhost:5000
+
+Negotiation service: http://localhost:9000
+
+Redis: localhost:6379 (Compose service name redis)
+
+Endpoints
+Language detection service (http://localhost:8000)
+
+GET /ping — health check: {"status":"ok"}
+
+POST /detect
+Body: {"text":"...","user_id":"optional-id"}
+Response: {"language":"en|pcm|yo|ig|ha","confidence":0.0-1.0}
+Behavior: if user_id has a saved preference in Redis, that preference is returned immediately with high confidence.
+
+POST /user/{user_id}/lang
+Body: {"language":"pcm"} — save user preference (returns {"ok":true,...}).
+
+DELETE /user/{user_id}/lang — remove user preference (useful for tests/cleanup).
+
+FastText microservice (http://localhost:5000)
+
+POST /predict
+Body: {"text":"hello"}
+Response: {"lang":"en","score":0.9986}
+
+Negotiation service (http://localhost:9000)
+
+POST /decide
+Example payload (the schema you use):
+
+{
+  "offer": 5000,
+  "product": {"id":"sku-lip-001","name":"Matte Lipstick - Ruby","base_price":12000},
+  "state": {"conversation_id":"t1","user_id":"u1", "meta": {"buyer_text": "How much for this?"}}
+}
 
 
+Response: JSON containing action, price, reply (localized), confidence, etc.
+
+Important environment variables
+
+Set these in .env (Compose reads env):
+
+REDIS_URL — default redis://redis:6379/0 (Compose service hostname redis).
+
+FASTTEXT_MODEL_PATH — path inside the language-detection container to a local .ftz model file, e.g. /app/models/lid.176.ftz (see mounting notes below).
+
+FASTTEXT_SERVICE_URL — alternatively use the fasttext microservice URL if you prefer remote calls.
+
+USER_LANG_PREF_TTL — TTL (seconds) for stored user language preference. Default used in this repo: 86400 (1 day). Previously 30 days in older configs.
+
+Thresholds & tuning are available in language_detection.py (e.g. LANG_DETECT_CONF_THRESHOLD, LANG_DETECT_EVIDENCE_THRESHOLD, ...).
+
+Where the code lives (key files)
+
+services/conversation_engine/src/app.py — FastAPI wrapper (endpoints).
+
+services/conversation_engine/src/language_detection.py — detection logic (fastText + markers + override).
+
+services/conversation_engine/src/core/language_pref.py — Redis helpers (set/get/delete) and TTL handling.
+
+services/fasttext_service/ — fastText microservice Dockerfile + app.
+
+services/negotiation_service/ — negotiation logic and Dockerfile.
+
+tests/ — integration & language tests (scripts).
+
+How user preference (TTL) works — short explanation
+
+TTL (time-to-live) is the number of seconds a saved user preference will remain in Redis before it expires automatically.
+
+Example: USER_LANG_PREF_TTL=86400 → preference expires after 1 day.
+
+In unit/integration tests we often set a small TTL (10s) to demonstrate expiry.
+
+You can increase TTL by setting USER_LANG_PREF_TTL in .env or the environment.
+
+Mounting the FastText model into containers (fixing the "file not found" warning)
+
+You mentioned the model exists at:
+
+/workspaces/conversational-engine/services/conversation_engine/models/lid.176.ftz
+
+
+To let the language-detection container load it locally, do one of the following in your docker-compose.yml:
+
+Option A — mount into /app/models and set FASTTEXT_MODEL_PATH accordingly
+
+services:
+  language-detection:
+    environment:
+      - FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz
+    volumes:
+      - ./services/conversation_engine/models/lid.176.ftz:/app/models/lid.176.ftz:ro
+
+
+Option B — mount into /app/conversation_engine/models
+This sometimes causes bind/permission issues if the image expects that path to be immutable. If you encountered read-only file system when mounting into /app/conversation_engine/models/..., prefer Option A (mount to /app/models); then set FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz. This avoids mounting into package directories that the image may mark read-only.
+
+After mounting, restart:
+
+docker compose up -d --build language-detection
+docker compose logs -f language-detection
+# you should see:
+# [language_detection] fastText model loaded from: /app/models/lid.176.ftz
+
+Running tests & integration scripts
+
+From repo root:
+
+# run quick integration smoke test
+./tests/integration_test.sh
+
+# run language/negotiation checks
 ./tests/test_languages.sh
 
+# run a unit test script (example)
+python tests/test_user_lang_pref.py
 
-git add services/conversation_engine/src/app.py
-git commit -m "Restore conversation_engine language-detection main app.py"
-git push origin fix/llm-phraser-template-guard
+
+Notes:
+
+integration_test.sh and test_languages.sh start services via Docker Compose and run a sequence of requests/assertions.
+
+Delete user prefs (cleanup) — integration_test.sh calls the DELETE endpoint at the end.
+
+Troubleshooting (common issues & fixes)
+FASTTEXT_MODEL_PATH set but file not found
+
+Fix: mount the model inside the container and set FASTTEXT_MODEL_PATH to the mount location (see Mounting section).
+
+Docker error: read-only file system when mounting model
+
+Avoid mounting into container paths that are part of the image overlay and read-only (e.g. /app/conversation_engine/models in some images). Instead mount into /app/models and update FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz.
+
+Redis errors (tests failing with Name or service not known)
+
+Make sure Redis is running via Compose: docker compose up -d redis.
+
+If executing tests outside of Docker, set REDIS_URL=redis://localhost:6379/0 or point to your Redis host.
+
+No matching distribution found for numpy==... when building images
+
+This is a packaging/platform compatibility problem when pip can't find a wheel for your Python base image. Options:
+
+Use an image where the required numpy wheel exists (e.g., official python slim images).
+
+Relax numpy version pins in requirements.txt to a compatible version.
+
+Install via pip with system build tools (but be prepared for longer builds).
+
+FastText library runtime ValueError: Unable to avoid copy while creating an array as requested.
+
+This is a NumPy/fasttext compatibility issue (NumPy 2.x changes). Update fasttext package or adjust the call site (use np.asarray instead of np.array(..., copy=False)) — the fasttext wheel should be compatible with the numpy version in your image.
+
+Language detection seems wrong (e.g., Igbo returned for English)
+
+Check language-detection container logs for lines beginning with override: — the logs show why an override happened and which markers matched.
+
+Tweak language_detection.py markers/thresholds:
+
+LANG_DETECT_CONF_THRESHOLD — confidence threshold above which fastText is trusted.
+
+LANG_DETECT_EVIDENCE_THRESHOLD — amount of marker evidence required to override.
+
+You can remove or make marker lists more conservative.
+
+Extending / adding a language
+
+Add marker sets in language_detection.py:
+
+STRONG_MARKERS_NEW = {...}
+WEAK_MARKERS_NEW   = {...}
+LANG_MARKERS['new'] = (STRONG_MARKERS_NEW, WEAK_MARKERS_NEW)
+
+
+Add 'new' to supported languages where applicable (API validation).
+
+Add localized templates/translations in the negotiation service.
+
+Add tests in tests/ verifying detection + negotiation for that language.
+
+Examples (curl)
+
+Detect language:
+
+curl -sS -X POST 'http://localhost:8000/detect' -H 'Content-Type: application/json' \
+  -d '{"text":"Abeg, how much for this?"}' | jq
+# -> {"language":"pcm","confidence":0.99}
+
+
+Set user preference:
+
+curl -sS -X POST http://localhost:8000/user/alice/lang -H "Content-Type: application/json" \
+  -d '{"language":"pcm"}' | jq
+# -> {"ok": true, "message": "Preference saved: replies will be in pcm", "language":"pcm"}
+
+
+Delete user preference:
+
+curl -sS -X DELETE http://localhost:8000/user/alice/lang | jq
+# -> {"ok": true, "message":"Preference deleted", "user_id":"alice"}
+
+
+Negotiation call:
+
+payload=$(cat <<JSON
+{
+  "offer": 5000,
+  "product": {"id":"sku-lip-001","name":"Matte Lipstick - Ruby","base_price":12000},
+  "state": {"conversation_id":"t1","user_id":"u1", "meta": {"buyer_text": "How much for this?"}}
+}
+JSON
+)
+curl -sS -X POST "http://localhost:9000/decide" -H "Content-Type: application/json" -d "$payload" | jq
+
+Notes about development & packaging
+
+Docker builds use pip in the image. Using pipenv inside the Dockerfile is possible but not recommended — Dockerfiles are simpler and faster with pip install -r requirements.txt. If you prefer pipenv, you'd update the Dockerfile to install Pipenv and pipenv lock --requirements during the build; that is more complex and usually unnecessary for container builds.
+
+If developing locally without Docker, create & activate a virtualenv and install services/conversation_engine/requirements.txt.

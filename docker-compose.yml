@@ -1,0 +1,166 @@
+# docker-compose.yml
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: convo_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  fasttext-service:
+    build:
+      context: .
+      dockerfile: services/fasttext_service/Dockerfile
+    container_name: convo_fasttext_service
+    environment:
+      - FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz
+      - FASTTEXT_TIMEOUT=2.0
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./services/conversation_engine/models/lid.176.ftz:/app/models/lid.176.ftz:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS -X POST http://localhost:5000/predict -H 'Content-Type: application/json' -d '{\"text\":\"hello\"}' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  language-detection:
+    build:
+      context: .
+      dockerfile: services/conversation_engine/src/core/Dockerfile
+    container_name: conversation_engine-language-detection
+    entrypoint: ["/app/entrypoint.sh"]
+    environment:
+      - PYTHONPATH=/app
+      - LANGUAGE_DETECTION_URL=http://language-detection:8000/detect
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_MODE=${LLM_MODE:-REMOTE}
+      - FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz
+      - FASTTEXT_SERVICE_URL=http://fasttext-service:5000/predict
+      - FASTTEXT_SERVICE_TIMEOUT=2.0
+      - LLM_REMOTE_PROVIDER=${LLM_REMOTE_PROVIDER:-GROQ}
+      - LLM_MODEL=${LLM_MODEL:-mistral-7b-instruct}
+      - LLM_REMOTE_URL=${LLM_REMOTE_URL:-https://api.groq.com/openai/v1/chat/completions}
+      - LLM_REMOTE_TIMEOUT=${LLM_REMOTE_TIMEOUT:-20}
+      - LLM_ALLOW_REMOTE_WITHOUT_PRICE=true
+      - LLM_DEBUG_REMOTE=true
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+      - HF_TOKEN_FILE=/run/secrets/hf_token
+      - LLM_API_KEY_FILE=/run/secrets/llm_api_key
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python - <<'PY'\nimport sys, urllib.request\ntry:\n  r = urllib.request.urlopen('http://127.0.0.1:8000/ping', timeout=3)\n  if r.status != 200:\n    sys.exit(1)\nexcept Exception:\n  sys.exit(1)\nprint('OK')\nPY"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    volumes:
+      - ./services/conversation_engine/src:/app/conversation_engine:ro
+      - ./services/conversation_engine/models/lid.176.ftz:/app/models/lid.176.ftz:ro
+      - ./services/negotiation_service/llm_phraser.py:/app/llm_phraser.py:ro
+      - ./services/negotiation_service/entrypoint.sh:/app/entrypoint.sh:ro
+      - ./secrets/groq_api_key:/run/secrets/groq_api_key:ro
+      - ./secrets/openai_api_key:/run/secrets/openai_api_key:ro
+      - ./secrets/hf_token:/run/secrets/hf_token:ro
+      - ./secrets/llm_api_key:/run/secrets/llm_api_key:ro
+    depends_on:
+      - redis
+      - fasttext-service
+
+
+  negotiation:
+    build:
+      context: .
+      dockerfile: services/negotiation_service/Dockerfile
+    container_name: conversation_engine-negotiation
+    entrypoint: ["/app/negotiation_service/entrypoint.sh"]
+    restart: unless-stopped
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - LANGUAGE_DETECTION_URL=http://language-detection:8000/detect
+      - REDIS_URL=redis://redis:6379/0
+      - LLM_MODE=${LLM_MODE:-REMOTE}
+      - LLM_REMOTE_PROVIDER=${LLM_REMOTE_PROVIDER:-GROQ}
+      - LLM_MODEL=${LLM_MODEL:-groq/compound-mini}
+      - LLM_REMOTE_URL=${LLM_REMOTE_URL:-https://api.groq.com/openai/v1/chat/completions}
+      - LLM_REMOTE_TIMEOUT=${LLM_REMOTE_TIMEOUT:-20}
+      - LLM_ALLOW_REMOTE_WITHOUT_PRICE=true
+      - LLM_DEBUG_REMOTE=true
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - UVICORN_PORT=9000
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+      - HF_TOKEN_FILE=/run/secrets/hf_token
+      - LLM_API_KEY_FILE=/run/secrets/llm_api_key
+    ports:
+      - "9000:9000"
+    depends_on:
+      language-detection:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./services/negotiation_service:/app/negotiation_service:ro
+      - ./secrets/groq_api_key:/run/secrets/groq_api_key:ro
+      - ./secrets/openai_api_key:/run/secrets/openai_api_key:ro
+      - ./secrets/hf_token:/run/secrets/hf_token:ro
+      - ./secrets/llm_api_key:/run/secrets/llm_api_key:ro
+
+  conversation-engine:
+    build:
+      context: .
+      dockerfile: services/conversation_engine/src/core/Dockerfile
+    container_name: conversation_engine-orchestrator
+    entrypoint: ["/app/entrypoint.sh"]
+    restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+      - LANGUAGE_DETECTION_URL=http://language-detection:8000/detect
+      - REDIS_URL=redis://redis:6379/0
+      - FORCE_USE_REDIS=1
+      - DECISION_MODEL_PATH=
+      - ACCEPT_RATIO=0.90
+      - COUNTER_BIAS=0.4
+      - LLM_MODE=${LLM_MODE:-REMOTE}
+      - LLM_REMOTE_PROVIDER=${LLM_REMOTE_PROVIDER:-GROQ}
+      - LLM_MODEL=${LLM_MODEL:-mistral-7b-instruct}
+      - LLM_REMOTE_URL=${LLM_REMOTE_URL:-https://api.groq.com/openai/v1/chat/completions}
+      - LLM_REMOTE_TIMEOUT=${LLM_REMOTE_TIMEOUT:-20}
+      - GROQ_API_KEY_FILE=/run/secrets/groq_api_key
+      - OPENAI_API_KEY_FILE=/run/secrets/openai_api_key
+      - HF_TOKEN_FILE=/run/secrets/hf_token
+      - LLM_API_KEY_FILE=/run/secrets/llm_api_key
+    ports:
+      - "9100:8000"
+    volumes:
+      - ./services/conversation_engine/src:/app/conversation_engine:ro
+      - ./services/negotiation_service/llm_phraser.py:/app/llm_phraser.py:ro
+      - ./services/negotiation_service/entrypoint.sh:/app/entrypoint.sh:ro
+      - ./secrets/groq_api_key:/run/secrets/groq_api_key:ro
+      - ./secrets/openai_api_key:/run/secrets/openai_api_key:ro
+      - ./secrets/hf_token:/run/secrets/hf_token:ro
+      - ./secrets/llm_api_key:/run/secrets/llm_api_key:ro
+    depends_on:
+      language-detection:
+        condition: service_healthy
+      negotiation:
+        condition: service_started
+      redis:
+        condition: service_healthy
+
+secrets:
+  groq_api_key:
+    file: ./secrets/groq_api_key
+  openai_api_key:
+    file: ./secrets/openai_api_key
+  hf_token:
+    file: ./secrets/hf_token
+  llm_api_key:
+    file: ./secrets/llm_api_key

@@ -1,252 +1,291 @@
+Conversational Negotiation Engine
+📖 Project Overview
+
+The Conversational Negotiation Engine is a multilingual, context-aware negotiation system designed to simulate human-like bargaining and decision-making across multiple languages. It integrates language detection, LLM-powered negotiation phrasing, and real-time decision orchestration into a containerized microservices architecture.
+
+This project demonstrates how to build a negotiation service that can:
+
+Detect language of input dynamically
+
+Respond with contextually appropriate negotiation replies
+
+Handle multiple languages including English (EN), Nigerian Pidgin (PCM), Yoruba (YO), Hausa (HA), and Igbo (IG)
+
+Support remote Large Language Model (LLM) providers
+
+Be deployed using Docker and Docker Compose
+
+🚀 Architecture
+
+The system is composed of three main services:
+
+1. Redis
+
+Acts as a caching and state management layer.
+
+Stores conversation context and pricing history.
+
+Exposes standard Redis ports for inter-service communication.
+
+2. Language Detection Service
+
+Detects the language of a given negotiation request.
+
+Returns normalized language codes and confidence scores.
+
+URL: http://language-detection:8000/detect
+
+3. Negotiation Service
+
+Handles core negotiation logic.
+
+Uses LLM to generate negotiation responses based on context.
+
+Supports multiple languages with customized templates and overrides.
+
+Price determination logic is configurable via environment variables.
+
+4. Conversation Orchestrator
+
+Coordinates language detection and negotiation services.
+
+Acts as the entry point for conversation requests.
+
+Integrates with Redis for context persistence.
+
+🛠 Technology Stack
+
+Python 3.12
+
+FastAPI for HTTP APIs
+
+Uvicorn as ASGI server
+
+Redis for caching and state management
+
+Docker & Docker Compose for container orchestration
+
+LLM Providers: GROQ, OpenAI, Hugging Face (configurable)
+
+Languages Supported: EN, PCM, YO, HA, IG
+
+📂 Project Structure
+.
+├── .dockerignore
+├── .env
+├── .gitignore
+├── .pytest_cache
+│   ├── .gitignore
+│   ├── CACHEDIR.TAG
+│   ├── README.md
+│   └── v
+│       └── cache
+│           ├── lastfailed
+│           └── nodeids
+├── .vscode
+│   └── settings.json
+├── README
+├── cleanup.sh
+├── docker-compose.yml
+├── models.txt
+├── requirements.txt
+├── scafold.py
+├── secrets
+│   ├── groq_api_key
+│   ├── hf_token
+│   ├── llm_api_key
+│   └── openai_api_key
+├── services
+│   ├── __init__.py
+│   ├── conversation_engine
+│   │   ├── __init__.py
+│   │   ├── __pycache__
+│   │   │   └── __init__.cpython-312.pyc
+│   │   ├── data
+│   │   │   ├── intent_samples.csv
+│   │   │   ├── product_catalog.json
+│   │   │   └── prompts_sample.jsonl
+│   │   ├── models
+│   │   │   ├── intent_model.pkl
+│   │   │   └── lid.176.ftz
+│   │   ├── scripts
+│   │   │   ├── test_language-detection.py
+│   │   │   ├── train_intent_model.py
+│   │   │   └── train_lora_13b.py
+│   │   └── src
+│   │       ├── __init__.py
+│   │       ├── core
+│   │       │   ├── Dockerfile
+│   │       │   ├── __init__.py
+│   │       │   ├── __pycache__
+│   │       │   │   ├── __init__.cpython-312.pyc
+│   │       │   │   ├── app.cpython-312.pyc
+│   │       │   │   ├── conversation_engine.cpython-312.pyc
+│   │       │   │   └── intent_classifier.cpython-312.pyc
+│   │       │   ├── amount_parser.py
+│   │       │   ├── app.py
+│   │       │   ├── audit.py
+│   │       │   ├── conversation_engine.py
+│   │       │   ├── cultural_intelligence.py
+│   │       │   ├── decision_model.py
+│   │       │   ├── intent_classifier.py
+│   │       │   ├── language_detection.py
+│   │       │   ├── models.py
+│   │       │   ├── price_guard.py
+│   │       │   ├── product_catalog.py
+│   │       │   ├── requirements.txt
+│   │       │   ├── state_store.py
+│   │       │   └── utils.py
+│   │       └── language_detection.py
+│   └── negotiation_service
+│       ├── Dockerfile
+│       ├── __init__.py
+│       ├── __pycache__
+│       │   └── app.cpython-312.pyc
+│       ├── app.py
+│       ├── app.py.bak
+│       ├── entrypoint.sh
+│       ├── llm_phraser.py
+│       └── requirements.txt
+└── tests
+    ├── __pycache__
+    │   └── test_handle.cpython-312-pytest-8.4.1.pyc
+    ├── test_audit.py
+    ├── test_handle.py
+    ├── test_handle_endpoint.sh
+    ├── test_intent_classifier.sh
+    └── test_languages.sh
 
 
-    Quick summary
+⚙️ Setup Instructions
+Prerequisites
 
-This repo runs a small microservice stack that:
+Docker ≥ 20.x
 
-Detects language of short user messages (English, Pidgin/pcm, Yoruba, Igbo, Hausa).
+Docker Compose ≥ 2.x
 
-Lets users set a preferred reply language (stored in Redis with TTL).
+API keys for your LLM provider(s):
 
-Uses a negotiation service that composes localized replies based on the detected/preferred language.
+GROQ
 
-Runs in Docker Compose for easy local development and testing.
+OpenAI
 
-Quickstart (run locally)
+Hugging Face
 
-From repo root:
+Clone the Repository
+git clone <repo-url>
+cd conversational-engine
 
-# build & start core services (fasttext, redis, language-detection, negotiation)
-docker compose up -d --build fasttext-service redis language-detection negotiation
+Add Secrets
 
-# health check
-curl -sS http://localhost:8000/ping | jq
+Place your API keys in ./secrets/:
+
+secrets/
+├── groq_api_key
+├── openai_api_key
+├── hf_token
+├── llm_api_key
+
+Run the Services
+docker compose up --build
 
 
-Expected services / ports:
+This will:
 
-Language detection API: http://localhost:8000
+Start Redis
 
-FastText microservice: http://localhost:5000
+Start Language Detection service on port 8000
 
-Negotiation service: http://localhost:9000
+Start Negotiation service on port 9000
 
-Redis: localhost:6379 (Compose service name redis)
+Start Conversation Orchestrator on port 9100
 
-Endpoints
-Language detection service (http://localhost:8000)
+🧪 Testing
 
-GET /ping — health check: {"status":"ok"}
+Run the provided language test script:
 
-POST /detect
-Body: {"text":"...","user_id":"optional-id"}
-Response: {"language":"en|pcm|yo|ig|ha","confidence":0.0-1.0}
-Behavior: if user_id has a saved preference in Redis, that preference is returned immediately with high confidence.
+tests/test_languages.sh
 
-POST /user/{user_id}/lang
-Body: {"language":"pcm"} — save user preference (returns {"ok":true,...}).
 
-DELETE /user/{user_id}/lang — remove user preference (useful for tests/cleanup).
-
-FastText microservice (http://localhost:5000)
-
-POST /predict
-Body: {"text":"hello"}
-Response: {"lang":"en","score":0.9986}
-
-Negotiation service (http://localhost:9000)
-
-POST /decide
-Example payload (the schema you use):
+Expected output:
 
 {
-  "offer": 5000,
-  "product": {"id":"sku-lip-001","name":"Matte Lipstick - Ruby","base_price":12000},
-  "state": {"conversation_id":"t1","user_id":"u1", "meta": {"buyer_text": "How much for this?"}}
+  "action": "COUNTER",
+  "price": 7800,
+  "confidence": 1.0,
+  "strategy_tag": null,
+  "meta": null,
+  "reply": "<language-specific reply>"
 }
 
+🔧 Configuration
 
-Response: JSON containing action, price, reply (localized), confidence, etc.
+All services support environment variables for configuration. For example:
 
-Important environment variables
+LLM_MODE – Mode of LLM (LOCAL / REMOTE)
 
-Set these in .env (Compose reads env):
+LLM_REMOTE_PROVIDER – Remote LLM provider
 
-REDIS_URL — default redis://redis:6379/0 (Compose service hostname redis).
+LLM_MODEL – LLM model to use
 
-FASTTEXT_MODEL_PATH — path inside the language-detection container to a local .ftz model file, e.g. /app/models/lid.176.ftz (see mounting notes below).
+LLM_REMOTE_URL – LLM endpoint
 
-FASTTEXT_SERVICE_URL — alternatively use the fasttext microservice URL if you prefer remote calls.
+GROQ_API_KEY_FILE, OPENAI_API_KEY_FILE, HF_TOKEN_FILE, LLM_API_KEY_FILE – API key files
 
-USER_LANG_PREF_TTL — TTL (seconds) for stored user language preference. Default used in this repo: 86400 (1 day). Previously 30 days in older configs.
+These variables are set in docker-compose.yml and overridden via .env.
 
-Thresholds & tuning are available in language_detection.py (e.g. LANG_DETECT_CONF_THRESHOLD, LANG_DETECT_EVIDENCE_THRESHOLD, ...).
+🌍 Multilingual Support
 
-Where the code lives (key files)
+The system supports dynamic language detection and template-based negotiation. Current supported languages:
 
-services/conversation_engine/src/app.py — FastAPI wrapper (endpoints).
+English (en)
 
-services/conversation_engine/src/language_detection.py — detection logic (fastText + markers + override).
+Nigerian Pidgin (pcm)
 
-services/conversation_engine/src/core/language_pref.py — Redis helpers (set/get/delete) and TTL handling.
+Yoruba (yo)
 
-services/fasttext_service/ — fastText microservice Dockerfile + app.
+Hausa (ha)
 
-services/negotiation_service/ — negotiation logic and Dockerfile.
+Igbo (ig)
 
-tests/ — integration & language tests (scripts).
+Language-specific replies are defined and overridden in the llm_phraser.py.
 
-How user preference (TTL) works — short explanation
+📌 Future Improvements
 
-TTL (time-to-live) is the number of seconds a saved user preference will remain in Redis before it expires automatically.
+Add more languages and dialect support
 
-Example: USER_LANG_PREF_TTL=86400 → preference expires after 1 day.
+Implement persistent conversation state across sessions
 
-In unit/integration tests we often set a small TTL (10s) to demonstrate expiry.
+Add more sophisticated pricing negotiation strategies
 
-You can increase TTL by setting USER_LANG_PREF_TTL in .env or the environment.
+Integrate with external APIs for dynamic product pricing
 
-Mounting the FastText model into containers (fixing the "file not found" warning)
+🛡 Security
 
-You mentioned the model exists at:
+API keys are stored securely as Docker secrets
 
-/workspaces/conversational-engine/services/conversation_engine/models/lid.176.ftz
+Environment variables control LLM access and provider configurations
 
+📚 References
 
-To let the language-detection container load it locally, do one of the following in your docker-compose.yml:
+FastAPI
 
-Option A — mount into /app/models and set FASTTEXT_MODEL_PATH accordingly
+Redis
 
-services:
-  language-detection:
-    environment:
-      - FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz
-    volumes:
-      - ./services/conversation_engine/models/lid.176.ftz:/app/models/lid.176.ftz:ro
+Docker Compose
 
+📝 Author
 
-Option B — mount into /app/conversation_engine/models
-This sometimes causes bind/permission issues if the image expects that path to be immutable. If you encountered read-only file system when mounting into /app/conversation_engine/models/..., prefer Option A (mount to /app/models); then set FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz. This avoids mounting into package directories that the image may mark read-only.
+Tomisin Adeniyi (Tadeni00)
+Conversational AI Engineer
 
-After mounting, restart:
 
-docker compose up -d --build language-detection
-docker compose logs -f language-detection
-# you should see:
-# [language_detection] fastText model loaded from: /app/models/lid.176.ftz
 
-Running tests & integration scripts
 
-From repo root:
 
-# run quick integration smoke test
-./tests/integration_test.sh
+docker compose build --no-cache
+docker compose up --no-deps
+docker compose logs -f language-detection negotiation 
 
-# run language/negotiation checks
-./tests/test_languages.sh
+tests/test_languages.sh
 
-# run a unit test script (example)
-python tests/test_user_lang_pref.py
-
-
-Notes:
-
-integration_test.sh and test_languages.sh start services via Docker Compose and run a sequence of requests/assertions.
-
-Delete user prefs (cleanup) — integration_test.sh calls the DELETE endpoint at the end.
-
-Troubleshooting (common issues & fixes)
-FASTTEXT_MODEL_PATH set but file not found
-
-Fix: mount the model inside the container and set FASTTEXT_MODEL_PATH to the mount location (see Mounting section).
-
-Docker error: read-only file system when mounting model
-
-Avoid mounting into container paths that are part of the image overlay and read-only (e.g. /app/conversation_engine/models in some images). Instead mount into /app/models and update FASTTEXT_MODEL_PATH=/app/models/lid.176.ftz.
-
-Redis errors (tests failing with Name or service not known)
-
-Make sure Redis is running via Compose: docker compose up -d redis.
-
-If executing tests outside of Docker, set REDIS_URL=redis://localhost:6379/0 or point to your Redis host.
-
-No matching distribution found for numpy==... when building images
-
-This is a packaging/platform compatibility problem when pip can't find a wheel for your Python base image. Options:
-
-Use an image where the required numpy wheel exists (e.g., official python slim images).
-
-Relax numpy version pins in requirements.txt to a compatible version.
-
-Install via pip with system build tools (but be prepared for longer builds).
-
-FastText library runtime ValueError: Unable to avoid copy while creating an array as requested.
-
-This is a NumPy/fasttext compatibility issue (NumPy 2.x changes). Update fasttext package or adjust the call site (use np.asarray instead of np.array(..., copy=False)) — the fasttext wheel should be compatible with the numpy version in your image.
-
-Language detection seems wrong (e.g., Igbo returned for English)
-
-Check language-detection container logs for lines beginning with override: — the logs show why an override happened and which markers matched.
-
-Tweak language_detection.py markers/thresholds:
-
-LANG_DETECT_CONF_THRESHOLD — confidence threshold above which fastText is trusted.
-
-LANG_DETECT_EVIDENCE_THRESHOLD — amount of marker evidence required to override.
-
-You can remove or make marker lists more conservative.
-
-Extending / adding a language
-
-Add marker sets in language_detection.py:
-
-STRONG_MARKERS_NEW = {...}
-WEAK_MARKERS_NEW   = {...}
-LANG_MARKERS['new'] = (STRONG_MARKERS_NEW, WEAK_MARKERS_NEW)
-
-
-Add 'new' to supported languages where applicable (API validation).
-
-Add localized templates/translations in the negotiation service.
-
-Add tests in tests/ verifying detection + negotiation for that language.
-
-Examples (curl)
-
-Detect language:
-
-curl -sS -X POST 'http://localhost:8000/detect' -H 'Content-Type: application/json' \
-  -d '{"text":"Abeg, how much for this?"}' | jq
-# -> {"language":"pcm","confidence":0.99}
-
-
-Set user preference:
-
-curl -sS -X POST http://localhost:8000/user/alice/lang -H "Content-Type: application/json" \
-  -d '{"language":"pcm"}' | jq
-# -> {"ok": true, "message": "Preference saved: replies will be in pcm", "language":"pcm"}
-
-
-Delete user preference:
-
-curl -sS -X DELETE http://localhost:8000/user/alice/lang | jq
-# -> {"ok": true, "message":"Preference deleted", "user_id":"alice"}
-
-
-Negotiation call:
-
-payload=$(cat <<JSON
-{
-  "offer": 5000,
-  "product": {"id":"sku-lip-001","name":"Matte Lipstick - Ruby","base_price":12000},
-  "state": {"conversation_id":"t1","user_id":"u1", "meta": {"buyer_text": "How much for this?"}}
-}
-JSON
-)
-curl -sS -X POST "http://localhost:9000/decide" -H "Content-Type: application/json" -d "$payload" | jq
-
-Notes about development & packaging
-
-Docker builds use pip in the image. Using pipenv inside the Dockerfile is possible but not recommended — Dockerfiles are simpler and faster with pip install -r requirements.txt. If you prefer pipenv, you'd update the Dockerfile to install Pipenv and pipenv lock --requirements during the build; that is more complex and usually unnecessary for container builds.
-
-If developing locally without Docker, create & activate a virtualenv and install services/conversation_engine/requirements.txt.

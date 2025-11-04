@@ -17,9 +17,6 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "- Starting required services (fasttext, redis, language-detection, negotiation)..."
-docker compose up -d --build fasttext-service redis language-detection negotiation || true
-
 wait_for_http() {
   local url=$1; local timeout=${2:-$WAIT_TIMEOUT}
   echo "  -> waiting for $url (timeout ${timeout}s)..."
